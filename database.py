@@ -11,6 +11,7 @@ Covers:
     - inventory          (player_id -> item, quantity)
     - player_vehicles    (player_id -> vehicle, capped at 2 per player)
     - player_stats       (health/energy/hunger/thirst/hygiene/breathe/happiness)
+    - guest_passes       (Governor's House guests: which governor/deputy issued the pass)
 
 Nothing here talks to Discord directly — this is pure data access so it
 can be imported by any cog.
@@ -104,6 +105,23 @@ async def init_db():
                 happiness       NUMERIC NOT NULL DEFAULT 100,
                 health          NUMERIC NOT NULL DEFAULT 100,
                 updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            """
+        )
+
+        # Governor's House guest passes. The Discord role stays a plain
+        # "State Visitor/Guest" / "State Guest"; who issued it lives here.
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS guest_passes (
+                id               SERIAL PRIMARY KEY,
+                guest_player_id  INTEGER NOT NULL REFERENCES players(player_id) ON DELETE CASCADE,
+                host_player_id   INTEGER NOT NULL REFERENCES players(player_id) ON DELETE CASCADE,
+                state            TEXT NOT NULL,
+                pass_type        TEXT NOT NULL CHECK (pass_type IN ('visitor', 'guest')),
+                host_code        TEXT NOT NULL,
+                issued_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                UNIQUE (guest_player_id, host_player_id, state, pass_type)
             );
             """
         )
@@ -328,3 +346,71 @@ async def get_all_player_ids_for_decay():
     async with get_pool().acquire() as conn:
         rows = await conn.fetch("SELECT player_id FROM player_stats;")
         return [r["player_id"] for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Guest passes (Governor's House)
+# ---------------------------------------------------------------------------
+
+def make_host_code(host_role: str, host_player_id: int) -> str:
+    """host_role: 'governor' or 'deputy'. e.g. GOV-0042 / DEP-0042."""
+    prefix = "GOV" if host_role == "governor" else "DEP"
+    return f"{prefix}-{host_player_id:04d}"
+
+
+async def grant_guest_pass(guest_player_id: int, host_player_id: int, state: str,
+                           pass_type: str, host_role: str) -> str:
+    """Record that a governor/deputy gave someone access. Returns the host code."""
+    code = make_host_code(host_role, host_player_id)
+    async with get_pool().acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO guest_passes (guest_player_id, host_player_id, state, pass_type, host_code)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (guest_player_id, host_player_id, state, pass_type) DO NOTHING;
+            """,
+            guest_player_id, host_player_id, state, pass_type, code,
+        )
+    return code
+
+
+async def revoke_guest_pass(guest_player_id: int, host_player_id: int, state: str, pass_type: str):
+    async with get_pool().acquire() as conn:
+        await conn.execute(
+            """
+            DELETE FROM guest_passes
+            WHERE guest_player_id = $1 AND host_player_id = $2 AND state = $3 AND pass_type = $4;
+            """,
+            guest_player_id, host_player_id, state, pass_type,
+        )
+
+
+async def revoke_all_guest_passes_by_host(host_player_id: int, state: str):
+    """E.g. when a governor/deputy leaves office — everyone they invited loses access."""
+    async with get_pool().acquire() as conn:
+        await conn.execute(
+            "DELETE FROM guest_passes WHERE host_player_id = $1 AND state = $2;",
+            host_player_id, state,
+        )
+
+
+async def get_guest_passes(guest_player_id: int, state: str):
+    async with get_pool().acquire() as conn:
+        return await conn.fetch(
+            """
+            SELECT host_player_id, pass_type, host_code, issued_at
+            FROM guest_passes WHERE guest_player_id = $1 AND state = $2;
+            """,
+            guest_player_id, state,
+        )
+
+
+async def has_guest_pass(guest_player_id: int, state: str, pass_type: str) -> bool:
+    async with get_pool().acquire() as conn:
+        return bool(await conn.fetchval(
+            """
+            SELECT 1 FROM guest_passes
+            WHERE guest_player_id = $1 AND state = $2 AND pass_type = $3 LIMIT 1;
+            """,
+            guest_player_id, state, pass_type,
+        ))
