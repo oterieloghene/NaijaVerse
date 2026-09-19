@@ -46,6 +46,9 @@ from functools import partial
 
 STATES = ["Lagos", "Delta", "Abuja"]
 
+# Short codes used on NIN numbers, e.g. NIN0001DL
+STATE_CODES = {"Delta": "DL", "Lagos": "LA", "Abuja": "FCT"}
+
 # Petroleum commissioner is named differently per state.
 PETROLEUM_COMMISSIONER = {
     "Lagos": "Lagos Commissioner of Petroleum",

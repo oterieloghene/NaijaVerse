@@ -12,6 +12,7 @@ Covers:
     - player_vehicles    (player_id -> vehicle, capped at 2 per player)
     - player_stats       (health/energy/hunger/thirst/hygiene/breathe/happiness)
     - guest_passes       (Governor's House guests: which governor/deputy issued the pass)
+    - settings           (key/value config the bot needs, e.g. arrival-terminal channel per state)
 
 Nothing here talks to Discord directly — this is pure data access so it
 can be imported by any cog.
@@ -19,6 +20,8 @@ can be imported by any cog.
 
 import os
 import asyncpg
+
+from player_rules import format_nin
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
@@ -105,6 +108,22 @@ async def init_db():
                 happiness       NUMERIC NOT NULL DEFAULT 100,
                 health          NUMERIC NOT NULL DEFAULT 100,
                 updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            """
+        )
+
+        # Onboarding / immigration additions (safe to run on an existing database)
+        await conn.execute(
+            "ALTER TABLE players ADD COLUMN IF NOT EXISTS immigration_status TEXT NOT NULL DEFAULT 'arrived';"
+        )
+        await conn.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS nin TEXT UNIQUE;")
+        await conn.execute("CREATE SEQUENCE IF NOT EXISTS nin_seq START 1;")
+
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS settings (
+                key    TEXT PRIMARY KEY,
+                value  TEXT NOT NULL
             );
             """
         )
@@ -414,3 +433,75 @@ async def has_guest_pass(guest_player_id: int, state: str, pass_type: str) -> bo
             """,
             guest_player_id, state, pass_type,
         ))
+
+
+# ---------------------------------------------------------------------------
+# Onboarding & immigration
+# immigration_status: 'arrived' (picked destination) -> 'named' (!name) -> 'immigrated' (!immigrate)
+# ---------------------------------------------------------------------------
+
+async def delete_player_by_discord_id(discord_id: int):
+    """
+    Wipe a player completely (inventory, vehicles, stats and guest passes go with
+    them via ON DELETE CASCADE). Returns the deleted row, or None if they had none.
+    """
+    async with get_pool().acquire() as conn:
+        return await conn.fetchrow(
+            "DELETE FROM players WHERE discord_id = $1 RETURNING *;", discord_id
+        )
+
+
+async def record_name(player_id: int, full_name: str, age: int, state: str):
+    """Set by !name. New arrivals start as Indigene of their state, jobless and homeless."""
+    async with get_pool().acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE players
+            SET character_name = $1, age = $2, state_of_origin = $3,
+                occupation = 'Jobless', residence = 'Homeless',
+                immigration_status = 'named'
+            WHERE player_id = $4;
+            """,
+            full_name, age, state, player_id,
+        )
+
+
+async def assign_nin(player_id: int, state: str):
+    """
+    Set by !immigrate. Issues the next NIN (e.g. NIN0001DL) and marks the player
+    immigrated. Returns the NIN, or None if the player wasn't in the 'named' state.
+    """
+    async with get_pool().acquire() as conn:
+        async with conn.transaction():
+            number = await conn.fetchval("SELECT nextval('nin_seq');")
+            nin = format_nin(number, state)
+            result = await conn.execute(
+                """
+                UPDATE players SET nin = $1, immigration_status = 'immigrated'
+                WHERE player_id = $2 AND immigration_status = 'named';
+                """,
+                nin, player_id,
+            )
+            if result != "UPDATE 1":
+                return None
+            return nin
+
+
+# ---------------------------------------------------------------------------
+# Settings
+# ---------------------------------------------------------------------------
+
+async def set_setting(key: str, value: str):
+    async with get_pool().acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO settings (key, value) VALUES ($1, $2)
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
+            """,
+            key, value,
+        )
+
+
+async def get_setting(key: str):
+    async with get_pool().acquire() as conn:
+        return await conn.fetchval("SELECT value FROM settings WHERE key = $1;", key)

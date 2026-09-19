@@ -6,10 +6,14 @@ Minimal starting point for the RP bot. Wires together:
   - database.py  (Postgres connection + schema)
   - decay.py     (background stat decay loop)
   - keep_alive.py (Flask pinger so Render Web Service stays reachable)
+  - cogs/onboarding.py (arrival via Discord Onboarding roles, !name, !immigrate)
 
 Set these environment variables on Render:
   - DISCORD_TOKEN   -> your bot's token from the Discord Developer Portal
   - DATABASE_URL    -> your Render Postgres "Internal Database URL"
+
+In the Discord Developer Portal (Bot tab) turn ON "Server Members Intent" —
+the bot needs it to see people joining/leaving and to assign roles.
 """
 
 import os
@@ -23,20 +27,26 @@ from decay import start_decay_loop
 TOKEN = os.environ.get("DISCORD_TOKEN")
 
 intents = discord.Intents.default()
-intents.message_content = True  # needed for prefix commands like !register
+intents.message_content = True  # needed for prefix commands like !name
+intents.members = True          # needed for join/leave events and role assignment
 
-bot = commands.Bot(command_prefix="!", intents=intents)
+
+class RPBot(commands.Bot):
+    async def setup_hook(self):
+        # Runs once, before the bot connects: DB first, then the cogs that use it.
+        await database.init_db()
+        print("Database ready.")
+        await self.load_extension("cogs.onboarding")
+
+
+bot = RPBot(command_prefix="!", intents=intents)
 
 
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user} (id: {bot.user.id})")
 
-    # Set up the database connection + tables (safe to call every startup)
-    await database.init_db()
-    print("Database ready.")
-
-    # Start the background stat-decay loop
+    # Start the background stat-decay loop (start_decay_loop ignores repeat calls)
     start_decay_loop(bot)
     print("Decay loop running.")
 
