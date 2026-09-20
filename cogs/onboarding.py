@@ -4,8 +4,12 @@ cogs/onboarding.py
 Join flow (uses Discord's built-in Onboarding questions):
   1. Discord Onboarding asks the new member for a destination and a gender.
      Each answer hands out a role: "<State> Arrival" and Male / Female.
-  2. The bot sees the role change, creates the player record, and
-     arrival-terminal announces them.
+  2. The bot sees the role change, creates the player record (placed at the
+     Immigration Office — the parent location a new arrival stands in, which
+     also gives them access to its Refugee Camp sub-location per their
+     roles), and arrival-terminal announces them (a non-physical channel
+     that only ever carries the welcome message, not a place a player is
+     "at").
   3. An Immigration Officer, in #front-desk, runs  !name @player <Full Name> <age>
      -> player gets "<State> Indigene", Illiterate, Jobless, Homeless.
   4. Then  !immigrate @player
@@ -96,7 +100,7 @@ class Onboarding(commands.Cog):
             try:
                 await database.create_player(
                     after.id, after.display_name,
-                    gender=gender, current_state=state, current_sub_location="arrival-terminal",
+                    gender=gender, current_state=state, current_sub_location="immigration-office",
                 )
             except asyncpg.UniqueViolationError:
                 continue
