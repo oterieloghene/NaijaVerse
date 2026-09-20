@@ -128,17 +128,17 @@ def _state_government(S, A):
         locs["chief-of-staff"] = _loc("Chief of Staff", A(OFFICIAL, FED_OFFICIAL))
 
     locs["state-secretariat"] = _loc("State Secretariat", A(OFFICIAL, FED_OFFICIAL))
-    locs["council"] = _loc("Council", A(OFFICIAL, ("Top Government Official", EMP)), sub_locations={
+    locs["council"] = _loc("Council", A(OFFICIAL, ("{S} Top Official", EMP)), sub_locations={
         "ministry-of-finance": _sub("Ministry of Finance", A(OFFICIAL, FED_OFFICIAL)),
         "ministry-of-justice": _sub("Ministry of Justice", A(OFFICIAL, FED_OFFICIAL)),
         "ministry-of-agriculture": _sub("Ministry of Agriculture", A(OFFICIAL, FED_OFFICIAL)),
         "ministry-of-housing": _sub("Ministry of Housing", A(OFFICIAL, FED_OFFICIAL)),
-        "ministry-of-education": _sub("Ministry of Education", A(OFFICIAL, ("Top Government Official", EMP), FED_OFFICIAL)),
+        "ministry-of-education": _sub("Ministry of Education", A(OFFICIAL, ("{S} Top Official", EMP), FED_OFFICIAL)),
         "ministry-of-commerce": _sub("Ministry of Commerce", A(OFFICIAL, FED_OFFICIAL)),
-        "ministry-of-power-and-water": _sub("Ministry of Power and Water", A(OFFICIAL)),
+        "ministry-of-power-and-water": _sub("Ministry of Power and Water", A(OFFICIAL, FED_OFFICIAL)),
         "ministry-of-petroleum": _sub("Ministry of Petroleum", A(OFFICIAL, FED_OFFICIAL)),
         # Literal channel name is "council" but this one is the voice channel
-        "council-voice": _sub("Council", A(OFFICIAL, ("Top Government Official", EMP)), voice_channel=True),
+        "council-voice": _sub("Council", A(OFFICIAL, ("{S} Top Official", EMP)), voice_channel=True),
     })
     locs["city-hall"] = _loc("City Hall", A(RES), voice_channel=True)
 
@@ -174,7 +174,7 @@ def _common_categories(S):
                 "arrival-terminal": _loc("Arrival Terminal", A("{S} Arrival", RES), non_physical=True),
                 "airport": _loc("Airport", A(RES), non_physical=True),
                 "immigration-office": _loc("Immigration Office", A(RES, "{S} Arrival"), sub_locations={
-                    "refugee-camp": _sub("Refugee Camp", A("{S} Arrival")),
+                    "refugee-camp": _sub("Refugee Camp", A("{S} Arrival", "Immigration Officer")),
                     "travel-agency": _sub("Travel Agency", A(RES)),
                     "front-desk": _sub("Front Desk", A("Immigration Officer")),
                     "parcel-pickup": _sub("Parcel Pickup", A("Immigration Officer", "Dispatch Rider")),
@@ -202,7 +202,7 @@ def _common_categories(S):
             "locations": {
                 "clerk-office": _loc("Clerk Office", A(RES), sub_locations={
                     "lawyer-chambers": _sub("Lawyer Chambers", A(("Lawyer", EMP))),
-                    "judge-chambers": _sub("Judge Chambers", A(("High Judge", EMP))),
+                    "judge-chambers": _sub("Judge Chambers", A(("Chief Judge", EMP))),
                     "court-room": _sub("Court Room", A(RES), voice_channel=True),
                 }),
             },
@@ -212,6 +212,8 @@ def _common_categories(S):
 
     if S != "Abuja":
         categories["governors_house"] = _governors_house(S, A)
+    else:
+        categories["state_government"]["display_name"] = "Abuja Federal Government"
 
     categories.update({
         "bank_plc": {
@@ -234,8 +236,8 @@ def _common_categories(S):
             "locations": {
                 "police-station": _loc("Police Station", A(RES), sub_locations={
                     "officers-office": _sub("Officers Office", A(*_with_emp("Police Officer"))),
-                    "investigation-room": _sub("Investigation Room", A(*_with_emp("Police Officer"))),
-                    "holding-cell": _sub("Holding Cell", A(*_with_emp("Police Officer"), "Jail Visitor")),
+                    "investigation-room": _sub("Investigation Room", A(*_with_emp("Police Officer"), "Suspect", "Arrested")),
+                    "holding-cell": _sub("Holding Cell", A(*_with_emp("Police Officer"), "Jail Visitor", "Arrested")),
                     "patrol": _sub("Patrol", A(*_with_emp("Police Officer"))),
                     "forensics": _sub("Forensics", A(*_with_emp("Police Officer"))),
                     "armoury": _sub("Armoury", A(*_with_emp("Police Officer"))),
@@ -251,7 +253,7 @@ def _common_categories(S):
                 "hospital-lobby": _loc("Hospital Lobby", A(RES), sub_locations={
                     "hospital-reception": _sub("Hospital Reception", A("Healed", "Out Patient", "Hospital Visitor", *_with_emp("Medic Staff"))),
                     "nursing-station": _sub("Nursing Station", A(*_with_emp("Medic Staff"))),
-                    "emergency": _sub("Emergency", A(*_with_emp("Medic Staff"))),
+                    "emergency": _sub("Emergency", A(*_with_emp("Medic Staff"), "Unconscious")),
                     "pharmacy-and-laboratory": _sub("Pharmacy and Laboratory", A(*_with_emp("Medic Staff"))),
                     "consultation": _sub("Consultation", A(*_with_emp("Medic Staff"), "Out Patient")),
                     "dentistry": _sub("Dentistry", A(*_with_emp("Dentist"), "Dental Patient", "Chief Medical Director", "Deputy Medical Director")),
@@ -276,7 +278,7 @@ def _common_categories(S):
             "locations": {
                 "help-desk": _loc("Help Desk", A(RES), sub_locations={
                     "technician-office": _sub("Technician Office", A(*_with_emp("Technician"))),
-                    "operations": _sub("Operations", A(*_with_emp("Commissioner of Power and Water Resources"))),
+                    "operations": _sub("Operations", A(*_with_emp("{S} Commissioner of Power and Water Resources"))),
                     "billing": _sub("Billing", A("{S} Resident", *_with_emp("Technician")), non_physical=True),
                     "fault-report": _sub("Fault Report", A(*_with_emp("Technician")), non_physical=True),
                 }),
@@ -423,13 +425,21 @@ LOCATIONS["Abuja"]["aso_rock"] = {
     "locations": {
         "president-office": _loc("President Office", _A_ABUJA("President", "Meeting with President")),
         "vice-president-office": _loc("Vice President Office", _A_ABUJA("Vice President", "Meeting with Vice")),
-        "chief-of-staff": _loc("Chief of Staff", _A_ABUJA(OFFICIAL, FED_OFFICIAL)),
+        "chief-of-staff": _loc("Chief of Staff", _A_ABUJA(
+            OFFICIAL, FED_OFFICIAL, "Delta Government Official", "Lagos Government Official",
+        )),
         "president-villa": _loc("President Villa", _A_ABUJA("Federal Resident", "Federal Visitor/Guest", "Villa Staff"), sub_locations={
             "vice-president-residence": _sub("Vice President Residence", _A_ABUJA("Federal Resident", "Federal Visitor/Guest", "Villa Staff")),
             "villa-guesthouse": _sub("Villa Guesthouse", _A_ABUJA("Federal Resident", "Federal Guest", "Villa Staff")),
         }),
     },
 }
+
+# Abuja's judiciary gets an extra "Supreme Judge" route into judge-chambers,
+# plus a Supreme Court voice channel (gated the same as court-room: bare Abuja role).
+_abuja_judge_chambers = LOCATIONS["Abuja"]["judiciary"]["locations"]["clerk-office"]["sub_locations"]["judge-chambers"]
+_abuja_judge_chambers["access"] = _abuja_judge_chambers["access"] + [["Supreme Judge"]]
+LOCATIONS["Abuja"]["judiciary"]["locations"]["supreme-court"] = _loc("Supreme Court", _A_ABUJA(RES), voice_channel=True)
 
 LOCATIONS["Abuja"]["central_bank"] = {
     "display_name": "Central Bank of Nigeria",
@@ -507,7 +517,10 @@ LOCATIONS["Delta"]["state_specific_business"] = {
 LOCATIONS["Lagos"]["state_specific_business"] = {
     "display_name": "State-Specific Business Locations",
     "locations": {
-        "sea-port": _loc("Sea Port", _A_LAGOS(OFFICIAL, FED_OFFICIAL)),
+        "sea-port": _loc("Sea Port", _A_LAGOS(
+            "Lagos Commissioner of Commerce", "Delta Commissioner of Commerce",
+            "Abuja Commissioner of Commerce", "Minister of Trade and Commerce",
+        )),
     },
 }
 
