@@ -7,7 +7,7 @@ Join flow (uses Discord's built-in Onboarding questions):
   2. The bot sees the role change, creates the player record (placed at the
      Immigration Office — the parent location a new arrival stands in, which
      also gives them access to its Refugee Camp sub-location per their
-     roles), and arrival-terminal announces them (a non-physical channel
+     roles), and arrival-terminal announces them (tagging the Immigration Officer role) (a non-physical channel
      that only ever carries the welcome message, not a place a player is
      "at").
   3. An Immigration Officer, in #front-desk, runs  !name @player <Full Name> <age>
@@ -50,6 +50,7 @@ from player_rules import (
 )
 
 IMMIGRATION_STAFF_ROLES = {"immigration officer", "chief immigration officer"}
+IMMIGRATION_OFFICER_ROLE = "Immigration Officer"    # tagged in the arrival welcome message
 
 USAGE = {
     "name": "`!name @player <Full Name> <age>`",
@@ -58,14 +59,15 @@ USAGE = {
 }
 
 
-async def announce_in_arrival_terminal(guild, state, text, mention=None):
-    """Post in the given state's arrival-terminal (found automatically)."""
+async def announce_in_arrival_terminal(guild, state, text, mention=None, role=None):
+    """Post in the given state's arrival-terminal (found automatically). Only `mention` / `role` get pinged."""
     channel = find_arrival_terminal(guild.text_channels, state)
     if channel is None:
         print(f"[onboarding] Couldn't find the arrival-terminal for {state}; skipped: {text}")
         return
     try:
-        await channel.send(text, allowed_mentions=discord.AllowedMentions(users=[mention] if mention else False))
+        await channel.send(text, allowed_mentions=discord.AllowedMentions(
+            users=[mention] if mention else False, roles=[role] if role else False))
     except discord.HTTPException as exc:
         print(f"[onboarding] Couldn't post in arrival-terminal for {state}: {exc}")
 
@@ -116,8 +118,12 @@ class Onboarding(commands.Cog):
             except asyncpg.UniqueViolationError:
                 continue
             created = True
-            await announce_in_arrival_terminal(
-                after.guild, state, f"{after.mention} just arrived. Welcome to {state}.", mention=after)
+            officers, _ = find_roles(after.guild.roles, [IMMIGRATION_OFFICER_ROLE])
+            officer_role = officers[0] if officers else None
+            text = f"{after.mention} just arrived. Welcome to {state}."
+            if officer_role:
+                text += f" {officer_role.mention} will be with you shortly."
+            await announce_in_arrival_terminal(after.guild, state, text, mention=after, role=officer_role)
             break
 
         if actions["create"] and not created:
@@ -260,6 +266,7 @@ class Onboarding(commands.Cog):
             f"Read-only: {report['locked']} other text channels in {state}",
             "Visible in other states: " + (", ".join(f"`{c}`" for c in report["leaked"]) or "none ✅"),
             "Visible here but failing the role rules: " + (", ".join(f"`{c}`" for c in report["rule_failures"]) or "none ✅"),
+            "Should be visible but isn't: " + (", ".join(f"`{c}`" for c in report["hidden_wrongly"]) or "none ✅"),
         ]
         own_missing = report["missing"].get(state, [])
         if own_missing:
