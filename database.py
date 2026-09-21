@@ -141,7 +141,16 @@ async def init_db():
             "ALTER TABLE players ADD COLUMN IF NOT EXISTS immigration_status TEXT NOT NULL DEFAULT 'arrived';"
         )
         await conn.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS nin TEXT UNIQUE;")
-        await conn.execute("CREATE SEQUENCE IF NOT EXISTS nin_seq START 1;")
+        await conn.execute("CREATE SEQUENCE IF NOT EXISTS nin_seq START 1;")   # no longer used for NINs
+        # The number part of the NIN (NIN0007DL -> 7), shared across all states and unique, so a
+        # number is free again as soon as its player is gone.
+        await conn.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS nin_number INTEGER UNIQUE;")
+        await conn.execute(
+            """
+            UPDATE players SET nin_number = substring(nin from '^NIN([0-9]+)')::int
+            WHERE nin IS NOT NULL AND nin_number IS NULL;
+            """
+        )
 
         await conn.execute(
             """
@@ -490,21 +499,37 @@ async def record_name(player_id: int, full_name: str, age: int, state: str):
         )
 
 
+def lowest_free_number(used) -> int:
+    """Smallest positive integer not in `used` (1 if nothing is used)."""
+    taken = set(used)
+    number = 1
+    while number in taken:
+        number += 1
+    return number
+
+
+NIN_LOCK_ID = 7_310_001   # arbitrary app-wide key for the advisory lock below
+
+
 async def assign_nin(player_id: int, state: str):
     """
-    Set by !immigrate. Issues the next NIN (e.g. NIN0001DL) and marks the player
-    immigrated. Returns the NIN, or None if the player wasn't in the 'named' state.
+    Set by !immigrate. Issues the lowest NIN number nobody currently holds (across all states),
+    so the number of a player who left the server is handed out again, e.g. NIN0001DL.
+    Marks the player immigrated. Returns the NIN, or None if the player wasn't in the 'named' state.
     """
     async with get_pool().acquire() as conn:
         async with conn.transaction():
-            number = await conn.fetchval("SELECT nextval('nin_seq');")
+            # One issuer at a time, so two officers can't be given the same free number.
+            await conn.execute("SELECT pg_advisory_xact_lock($1);", NIN_LOCK_ID)
+            rows = await conn.fetch("SELECT nin_number FROM players WHERE nin_number IS NOT NULL;")
+            number = lowest_free_number(r["nin_number"] for r in rows)
             nin = format_nin(number, state)
             result = await conn.execute(
                 """
-                UPDATE players SET nin = $1, immigration_status = 'immigrated'
-                WHERE player_id = $2 AND immigration_status = 'named';
+                UPDATE players SET nin = $1, nin_number = $2, immigration_status = 'immigrated'
+                WHERE player_id = $3 AND immigration_status = 'named';
                 """,
-                nin, player_id,
+                nin, number, player_id,
             )
             if result != "UPDATE 1":
                 return None

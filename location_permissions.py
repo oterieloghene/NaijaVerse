@@ -264,11 +264,14 @@ async def audit_member(member, player):
         leaked          "State/code" for channels of OTHER states they can still see (should be empty)
         rule_failures   codes in their own state they can see but fail locations.py rules for
                         (should be empty when HIDE_FAILED_ACCESS is on)
+        hidden_wrongly  codes in their own state they PASS the rules for but can't see (Discord's
+                        role permissions don't show it, or a personal hide is in the way)
         missing         {state: [codes with no matching channel in the server]}
     """
     here_state = player["current_state"]
     role_names = [r.name for r in member.roles]
-    result = {"writable": [], "locked": 0, "leaked": [], "rule_failures": [], "missing": {}}
+    result = {"writable": [], "locked": 0, "leaked": [], "rule_failures": [],
+              "hidden_wrongly": [], "missing": {}}
 
     for state in STATES:
         channels = state_location_channels(member.guild, state)
@@ -287,6 +290,9 @@ async def audit_member(member, player):
                 result["writable"].append(code)
             else:
                 result["locked"] += 1
-            if perms.view_channel and not await may_see(role_names, player["player_id"], state, nodes[code]):
+            allowed = await may_see(role_names, player["player_id"], state, nodes[code])
+            if perms.view_channel and not allowed:
                 result["rule_failures"].append(code)
+            elif allowed and not perms.view_channel:
+                result["hidden_wrongly"].append(code)
     return result
