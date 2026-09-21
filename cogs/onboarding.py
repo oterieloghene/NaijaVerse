@@ -11,11 +11,16 @@ Join flow (uses Discord's built-in Onboarding questions):
      that only ever carries the welcome message, not a place a player is
      "at").
   3. An Immigration Officer, in #front-desk, runs  !name @player <Full Name> <age>
-     -> player gets "<State> Indigene", Illiterate, Jobless, Homeless.
+     -> the player's server nickname becomes their full name, and they get
+        "<State> Indigene", Illiterate, Jobless, Homeless, Single.
   4. Then  !immigrate @player
      -> player gets an ID (NIN0001DL / LA / FCT), and "<State> Arrival" is swapped
         for the state role ("Delta" / "Lagos" / "Abuja").
   5. If a member leaves the server, everything about them is deleted.
+
+Write/see access (see location_permissions.py): only the player's current location is writable, and
+channels they shouldn't see (other states, failed role rules) are hidden. It is set up when the
+player arrives and re-synced whenever their roles change.
 
 The bot never creates Discord roles — every role used here must already exist.
 
@@ -28,6 +33,11 @@ import discord
 from discord.ext import commands
 
 import database
+from location_permissions import (
+    audit_member,
+    clear_member_permissions,
+    sync_member_permissions,
+)
 from player_rules import (
     DEFAULT_NEW_ROLES,
     arrival_role,
@@ -44,6 +54,7 @@ IMMIGRATION_STAFF_ROLES = {"immigration officer", "chief immigration officer"}
 USAGE = {
     "name": "`!name @player <Full Name> <age>`",
     "immigrate": "`!immigrate @player`",
+    "checklocks": "`!checklocks @player`",
 }
 
 
@@ -126,6 +137,10 @@ class Onboarding(commands.Cog):
         except discord.HTTPException as exc:
             print(f"[onboarding] Couldn't revert onboarding change for {after}: {exc}")
 
+        # Write access follows location + roles: runs on arrival (gives the Immigration Office
+        # channels) and again whenever roles change (!name, !immigrate, officer roles, ...).
+        await sync_member_permissions(after)
+
     # --- leaving -----------------------------------------------------------
 
     @commands.Cog.listener()
@@ -133,6 +148,8 @@ class Onboarding(commands.Cog):
         if member.bot:
             return
         row = await database.delete_player_by_discord_id(member.id)
+        if row:
+            await clear_member_permissions(member)      # all three states, wherever they had been
         if row and row["current_state"]:
             await announce_in_arrival_terminal(
                 member.guild, row["current_state"],
@@ -166,10 +183,18 @@ class Onboarding(commands.Cog):
             return
 
         await database.record_name(player["player_id"], full_name, age, state)
+
+        problems = []
         try:
             await member.add_roles(*roles, reason=f"Named by {ctx.author}")
         except discord.HTTPException:
-            await ctx.send("Saved the name, but I couldn't assign the roles (is my role above them?). Run the command again once fixed.")
+            problems.append("assign the roles (is my role above theirs?)")
+        try:
+            await member.edit(nick=full_name, reason=f"Named by {ctx.author}")
+        except discord.HTTPException:
+            problems.append("change their nickname (I need Manage Nicknames and a role above theirs; I can never rename the server owner)")
+        if problems:
+            await ctx.send(f"Saved the name, but I couldn't {' or '.join(problems)}. Run the command again once fixed.")
             return
         await ctx.send(f"{member.mention} is now **{full_name}**, age {age}. Next: `!immigrate {member.mention}`")
 
@@ -214,6 +239,37 @@ class Onboarding(commands.Cog):
         embed.add_field(name="State", value=state)
         embed.add_field(name="NIN", value=nin, inline=False)
         await ctx.send(f"Welcome to {state}, {member.mention}.", embed=embed)
+
+    # --- admin check ---------------------------------------------------------------
+
+    @commands.command(name="checklocks")
+    @commands.guild_only()
+    @commands.has_permissions(administrator=True)
+    async def check_locks(self, ctx, member: discord.Member):
+        """!checklocks @player — where can this player write / see right now?"""
+        player = await database.get_player_by_discord_id(member.id)
+        if not player or not player["current_state"]:
+            await ctx.send(f"{member.mention} hasn't arrived yet.")
+            return
+
+        report = await audit_member(member, player)
+        state = player["current_state"]
+        lines = [
+            f"**{member.display_name}** ({state}) is at `{player['current_sub_location']}`",
+            f"Writable ({len(report['writable'])}): " + (", ".join(f"`{c}`" for c in report["writable"]) or "none"),
+            f"Read-only: {report['locked']} other text channels in {state}",
+            "Visible in other states: " + (", ".join(f"`{c}`" for c in report["leaked"]) or "none ✅"),
+            "Visible here but failing the role rules: " + (", ".join(f"`{c}`" for c in report["rule_failures"]) or "none ✅"),
+        ]
+        own_missing = report["missing"].get(state, [])
+        if own_missing:
+            lines.append(f"No matching channel in the server for {state}: " + ", ".join(f"`{c}`" for c in own_missing))
+        others = {s: len(m) for s, m in report["missing"].items() if s != state and m}
+        if others:
+            lines.append("Channels not found in other states: " + ", ".join(f"{s} {n}" for s, n in others.items()))
+        if member.guild_permissions.administrator:
+            lines.append("⚠️ This member is an Administrator, so Discord ignores channel permissions for them. Test with a non-admin account.")
+        await ctx.send("\n".join(lines)[:1900], allowed_mentions=discord.AllowedMentions.none())
 
     # --- errors ------------------------------------------------------------------
 
