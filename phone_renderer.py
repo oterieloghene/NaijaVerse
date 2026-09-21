@@ -11,6 +11,7 @@ Only needs Pillow. Test without Discord or a database:   python phone_renderer.p
 """
 
 import io
+from functools import lru_cache
 
 from PIL import Image, ImageChops, ImageDraw, ImageFont
 
@@ -18,6 +19,7 @@ import phone_config as cfg
 
 SCALE = 4                     # the battery is drawn 4x bigger, then shrunk, so its edges are smooth
 _template = None
+_render_cache = {}            # battery percent (0-100) -> already-rendered PNG bytes
 
 
 def _load_template():
@@ -27,22 +29,35 @@ def _load_template():
     return _template.copy()
 
 
+@lru_cache(maxsize=None)
+def _font(size):
+    """Loads each font size from disk once, then reuses it for every render."""
+    return ImageFont.truetype(str(cfg.FONT_PATH), size)
+
+
 def _average(img, box):
     patch = img.crop(box).resize((1, 1), Image.BOX)
     return patch.getpixel((0, 0))
 
 
 def _erase_old_battery(img):
-    """Paint over the old icon with the dark status-bar colour (smooth top-to-bottom blend)."""
+    """Paint over the old icon with the dark status-bar colour (smooth top-to-bottom blend).
+
+    Builds one 1-pixel-wide gradient column and stretches it across the box, instead of drawing
+    the fill one row at a time — the same picture, far fewer Pillow calls.
+    """
     left, top, right, bottom = cfg.BATTERY_ERASE_BOX
     above = _average(img, (left, top - 10, right, top - 4))
     below = _average(img, (left, bottom + 4, right, bottom + 10))
-    draw = ImageDraw.Draw(img)
-    height = max(bottom - top - 1, 1)
-    for i, y in enumerate(range(top, bottom)):
-        t = i / height
-        colour = tuple(round(above[c] + (below[c] - above[c]) * t) for c in range(3))
-        draw.line([(left, y), (right - 1, y)], fill=colour)
+    height = max(bottom - top, 1)
+    steps = max(height - 1, 1)
+    column = Image.new("RGB", (1, height))
+    column.putdata([
+        tuple(round(above[c] + (below[c] - above[c]) * (i / steps)) for c in range(3))
+        for i in range(height)
+    ])
+    gradient = column.resize((right - left, height), Image.NEAREST)
+    img.paste(gradient, (left, top))
 
 
 def _battery_layer(percent):
@@ -78,12 +93,12 @@ def _battery_layer(percent):
     # the number: dark over the charge, white over the empty part, so it is readable at any level
     label = f"{int(percent)}"
     size = 19 * s
-    font = ImageFont.truetype(str(cfg.FONT_PATH), size)
+    font = _font(size)
     text_mask = Image.new("L", layer.size, 0)
     tdraw = ImageDraw.Draw(text_mask)
     while size > 8 * s and tdraw.textlength(label, font=font) > (w - 6) * s:
         size -= s
-        font = ImageFont.truetype(str(cfg.FONT_PATH), size)
+        font = _font(size)
     cx, cy = (body[0] + body[2]) / 2, (body[1] + body[3]) / 2
     tdraw.text((cx, cy), label, font=font, fill=255, anchor="mm")
 
@@ -98,16 +113,24 @@ def _battery_layer(percent):
 
 
 def render_phone(battery_percent):
-    """The phone picture with the given battery percentage (0-100) drawn on it. Returns PNG bytes."""
+    """The phone picture with the given battery percentage (0-100) drawn on it. Returns PNG bytes.
+
+    Only 101 percentages are possible, so each is rendered once and reused after that.
+    """
     percent = max(0, min(100, int(battery_percent)))
+    cached = _render_cache.get(percent)
+    if cached is not None:
+        return cached
     img = _load_template()
     _erase_old_battery(img)
     layer, position = _battery_layer(percent)
     img = img.convert("RGBA")
     img.alpha_composite(layer, position)
     out = io.BytesIO()
-    img.convert("RGB").save(out, format="PNG", optimize=True)
-    return out.getvalue()
+    img.convert("RGB").save(out, format="PNG")            # optimize=True costs ~3s for ~5% smaller file — not worth it
+    data = out.getvalue()
+    _render_cache[percent] = data
+    return data
 
 
 if __name__ == "__main__":
