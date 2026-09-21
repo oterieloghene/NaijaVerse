@@ -112,6 +112,30 @@ async def init_db():
             """
         )
 
+        # Location is stored in two columns:
+        #   current_state        -> the state location: Delta / Lagos / Abuja (changes when travelling)
+        #   current_sub_location -> the parent location inside that state, e.g. "banking-hall"
+        # (the sub-locations INSIDE a parent, like the ATM, are role-gated and never stored).
+        # If an earlier version renamed this column to current_location, rename it back.
+        await conn.execute(
+            """
+            DO $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_schema = current_schema()
+                      AND table_name = 'players' AND column_name = 'current_location'
+                ) AND NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_schema = current_schema()
+                      AND table_name = 'players' AND column_name = 'current_sub_location'
+                ) THEN
+                    ALTER TABLE players RENAME COLUMN current_location TO current_sub_location;
+                END IF;
+            END $$;
+            """
+        )
+
         # Onboarding / immigration additions (safe to run on an existing database)
         await conn.execute(
             "ALTER TABLE players ADD COLUMN IF NOT EXISTS immigration_status TEXT NOT NULL DEFAULT 'arrived';"

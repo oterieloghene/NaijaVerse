@@ -10,9 +10,10 @@ from locations import STATES, STATE_CODES
 MIN_NAME_WORDS = 2      # "Full Name" = at least first + last name
 MIN_AGE = 1
 MAX_AGE = 120
+MAX_NAME_LENGTH = 32    # Discord's nickname limit — !name changes the player's server nickname
 
 # Roles every newly named player receives (plus "<State> Indigene")
-DEFAULT_NEW_ROLES = ("Illiterate", "Jobless", "Homeless")
+DEFAULT_NEW_ROLES = ("Illiterate", "Jobless", "Homeless", "Single")
 GENDER_OPTIONS = ("Male", "Female")
 
 
@@ -50,7 +51,11 @@ def parse_name_and_age(details):
         if not all(ch.isalpha() or ch in "-'." for ch in word):
             raise ValueError("Names can only contain letters, hyphens, apostrophes and full stops.")
 
-    return " ".join(name_parts), age
+    full_name = " ".join(name_parts)
+    if len(full_name) > MAX_NAME_LENGTH:
+        raise ValueError(f"The name is too long ({len(full_name)} characters). Discord allows at most {MAX_NAME_LENGTH}.")
+
+    return full_name, age
 
 
 def find_roles(guild_roles, names):
