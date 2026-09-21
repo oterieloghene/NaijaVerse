@@ -231,6 +231,17 @@ class Onboarding(commands.Cog):
             await ctx.send("Couldn't issue an ID right now. Please try again.")
             return
 
+        # The physical card follows later: it's stored now and posted in this state's parcel-pickup
+        # once its delay is up (see cogs/nin_delivery.py). Never allowed to break registration.
+        card_note = None
+        try:
+            from nin_card import schedule_nin_card
+            from document_config import NIN_CARD_DELAY_MINUTES
+            if await schedule_nin_card(player, nin, state):
+                card_note = f"Ready for pickup in about {NIN_CARD_DELAY_MINUTES} minutes."
+        except Exception as exc:
+            print(f"[nin] couldn't schedule the card for {member}: {exc!r}")
+
         arrival, _ = find_roles(ctx.guild.roles, [arrival_role(state)])
         try:
             await member.add_roles(*state_roles, reason=f"Immigrated by {ctx.author}")
@@ -244,6 +255,8 @@ class Onboarding(commands.Cog):
         embed.add_field(name="Age", value=str(player["age"]))
         embed.add_field(name="State", value=state)
         embed.add_field(name="NIN", value=nin, inline=False)
+        if card_note:
+            embed.add_field(name="NIN card", value=card_note, inline=False)
         await ctx.send(f"Welcome to {state}, {member.mention}.", embed=embed)
 
     # --- admin check ---------------------------------------------------------------
