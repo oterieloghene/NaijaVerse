@@ -74,7 +74,11 @@ async def _battery_ok(interaction, player):
     """True if the phone has charge. If it's dead, tells the person (privately) and returns False."""
     level = await phone_db.get_battery(player["player_id"])
     if phone_db.is_dead(level):
-        await interaction.response.send_message("🪫 Your phone's battery is dead.", ephemeral=True)
+        msg = "🪫 Your phone's battery is dead."
+        if interaction.response.is_done():        # already deferred by the caller
+            await interaction.followup.send(msg, ephemeral=True)
+        else:
+            await interaction.response.send_message(msg, ephemeral=True)
         return False
     return True
 
@@ -112,14 +116,14 @@ class PickupView(OwnedView):
 
     @discord.ui.button(label="Open phone", emoji="📱", style=discord.ButtonStyle.primary)
     async def open_phone(self, interaction, button):
+        await interaction.response.defer(ephemeral=True)   # acknowledge within 3s before any DB/render work
         player = await database.get_player_by_discord_id(interaction.user.id)
         if not player:
-            await interaction.response.defer()
             return
         level = await phone_db.get_battery(player["player_id"])
         embed, file = await _phone_screen(level)
-        await interaction.response.send_message(embed=embed, file=file, view=HomeView(interaction.user.id),
-                                                ephemeral=True)
+        await interaction.followup.send(embed=embed, file=file, view=HomeView(interaction.user.id),
+                                        ephemeral=True)
         self.stop()
         try:
             await interaction.message.delete()           # the public message goes away
@@ -157,13 +161,13 @@ class HomeView(OwnedView):
 
 
 async def show_home(interaction):
+    await interaction.response.defer()                    # acknowledge within 3s before any DB/render work
     player = await database.get_player_by_discord_id(interaction.user.id)
     if not player:
-        await interaction.response.defer()
         return
     level = await phone_db.get_battery(player["player_id"])
     embed, file = await _phone_screen(level)
-    await interaction.response.edit_message(embed=embed, attachments=[file], view=HomeView(interaction.user.id))
+    await interaction.edit_original_response(embed=embed, attachments=[file], view=HomeView(interaction.user.id))
 
 
 # ---------------------------------------------------------------------------
@@ -171,14 +175,14 @@ async def show_home(interaction):
 # ---------------------------------------------------------------------------
 
 async def open_bank(interaction):
+    await interaction.response.defer()                    # acknowledge within 3s before any DB work
     player, account = await _player_and_account(interaction)
-    if account is None:
-        await interaction.response.defer()               # no account: the app doesn't respond at all
+    if account is None:                                    # no account: the app doesn't respond at all
         return
     if not await _battery_ok(interaction, player):
         return
-    await interaction.response.edit_message(embed=_bank_menu_embed(account),
-                                            view=BankMenuView(interaction.user.id), attachments=[])
+    await interaction.edit_original_response(embed=_bank_menu_embed(account),
+                                             view=BankMenuView(interaction.user.id), attachments=[])
 
 
 async def show_bank_menu(interaction):
