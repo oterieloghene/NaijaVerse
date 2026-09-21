@@ -19,6 +19,8 @@ can be imported by any cog.
 """
 
 import os
+from decimal import Decimal
+
 import asyncpg
 
 from player_rules import format_nin
@@ -402,11 +404,12 @@ async def adjust_stat(player_id: int, stat_name: str, delta):
         raise ValueError(f"Unknown stat: {stat_name}")
 
     cfg = STAT_CONFIG[stat_name]
+    delta = Decimal(str(delta))     # the stat columns are NUMERIC (returned as Decimal), which can't be added to a float
     async with get_pool().acquire() as conn:
         current = await conn.fetchval(
             f"SELECT {stat_name} FROM player_stats WHERE player_id = $1;", player_id
         )
-        new_value = max(cfg["min"], min(cfg["max"], current + delta))
+        new_value = max(Decimal(cfg["min"]), min(Decimal(cfg["max"]), current + delta))
         await conn.execute(
             f"UPDATE player_stats SET {stat_name} = $1, updated_at = NOW() WHERE player_id = $2;",
             new_value, player_id,
