@@ -1,3 +1,5 @@
 discord.py
 asyncpg
 Flask
+Pillow
+qrcode

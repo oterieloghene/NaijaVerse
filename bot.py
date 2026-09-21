@@ -7,6 +7,7 @@ Minimal starting point for the RP bot. Wires together:
   - decay.py     (background stat decay loop)
   - keep_alive.py (Flask pinger so Render Web Service stays reachable)
   - cogs/onboarding.py (arrival via Discord Onboarding roles, !name, !immigrate)
+  - cogs/nin_delivery.py (NIN cards sent to parcel-pickup after 20 minutes, !portrait, !nincard)
 
 Set these environment variables on Render:
   - DISCORD_TOKEN   -> your bot's token from the Discord Developer Portal
@@ -37,6 +38,10 @@ class RPBot(commands.Bot):
         await database.init_db()
         print("Database ready.")
         await self.load_extension("cogs.onboarding")
+        try:
+            await self.load_extension("cogs.nin_delivery")
+        except Exception as exc:        # e.g. Pillow not installed yet: the rest of the bot still runs
+            print(f"NIN card delivery NOT loaded: {exc!r}")
 
 
 bot = RPBot(command_prefix="!", intents=intents)
@@ -52,5 +57,5 @@ async def on_ready():
 
 
 if __name__ == "__main__":
-    keep_alive()
+    keep_alive(bot)
     bot.run(TOKEN)

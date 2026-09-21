@@ -1,0 +1,339 @@
+"""
+document_renderer.py
+
+Generic engine that turns a document template + values into a finished PNG. It knows nothing about
+NINs: everything document-specific (template file, field boxes, fonts, colours) comes from
+document_config.DOCUMENTS, so a Resident Permit or Driver's Licence only needs a new config entry.
+
+Only needs Pillow (and `qrcode`, imported when a QR code is drawn). The master template is only ever
+read, never written.
+
+    png_bytes = render_document("nin", values, portrait_bytes, qr_data)
+"""
+
+import io
+import logging
+import statistics
+
+from PIL import Image, ImageChops, ImageDraw, ImageFont, ImageOps
+
+import document_config as cfg
+
+log = logging.getLogger(__name__)
+
+CORNER_RADIUS_PAD = 2        # measured radius is nudged up a hair so no grey canvas is left in the corners
+MAX_SOURCE_PIXELS = 40_000_000
+
+
+# ---------------------------------------------------------------------------
+# Template: find the card, crop it, measure its corners
+# ---------------------------------------------------------------------------
+
+def _corner_average(img, x, y, size=8):
+    patch = img.crop((x, y, x + size, y + size)).resize((1, 1), Image.BOX)
+    return patch.getpixel((0, 0))
+
+
+def _background_colour(img):
+    """Colour of the empty canvas around the card: the median of the four corner patches."""
+    w, h = img.size
+    corners = [_corner_average(img, 0, 0), _corner_average(img, w - 8, 0),
+               _corner_average(img, 0, h - 8), _corner_average(img, w - 8, h - 8)]
+    return tuple(int(statistics.median(c[i] for c in corners)) for i in range(3))
+
+
+def _detect_card_box(img, threshold=60, min_coverage=0.30):
+    """
+    Bounding box (left, top, right, bottom) of the card on its canvas, or None if it can't be
+    told apart from the canvas. A column/row counts as 'card' when at least 30% of its pixels
+    differ clearly from the canvas colour, which ignores the four rounded corners (they hold canvas)
+    and any speckle, while still including the full straight edges.
+    """
+    rgb = img.convert("RGB")
+    w, h = rgb.size
+    diff = ImageChops.difference(rgb, Image.new("RGB", rgb.size, _background_colour(rgb)))
+    r, g, b = diff.split()
+    total = ImageChops.add(ImageChops.add(r, g), b)
+    mask = total.point(lambda v: 255 if v > threshold else 0)
+
+    cols = mask.resize((w, 1), Image.BOX).tobytes()
+    rows = mask.resize((1, h), Image.BOX).tobytes()
+    limit = 255 * min_coverage
+    xs = [i for i, v in enumerate(cols) if v > limit]
+    ys = [i for i, v in enumerate(rows) if v > limit]
+    if not xs or not ys:
+        return None
+
+    box = (xs[0], ys[0], xs[-1] + 1, ys[-1] + 1)
+    if (box[2] - box[0]) < 0.5 * w or (box[3] - box[1]) < 0.5 * h:
+        return None
+    return box
+
+
+def crop_card_template(img, manual_crop=None):
+    """
+    Cut the empty canvas away from around the card without touching the card itself.
+    Returns (cropped_image, box_used). Uses manual_crop (left, top, right, bottom in template
+    pixels) when given; otherwise detects the card, and if detection is unreliable keeps the whole
+    image (and says so in the log) rather than risk cutting into the card.
+    """
+    w, h = img.size
+    if manual_crop:
+        left, top, right, bottom = manual_crop
+        box = (max(0, left), max(0, top), min(w, right), min(h, bottom))
+    else:
+        box = _detect_card_box(img)
+        if box is None:
+            log.warning("Couldn't detect the card area automatically; using the whole template. "
+                        "Set manual_crop in document_config.DOCUMENTS to fix this.")
+            box = (0, 0, w, h)
+    return img.crop(box), box
+
+
+def _detect_corner_radius(card, default=70):
+    """
+    Radius of the card's rounded corners, measured on the cropped card: walk diagonally in from
+    each corner until the pixel stops looking like the canvas. On a circular corner of radius r
+    that happens at t = r * (1 - 1/sqrt(2)) along the diagonal.
+    """
+    w, h = card.size
+    reach = min(w, h) // 3
+    hits = []
+    for cx, cy, dx, dy in ((0, 0, 1, 1), (w - 1, 0, -1, 1), (0, h - 1, 1, -1), (w - 1, h - 1, -1, -1)):
+        bg = card.getpixel((cx, cy))
+        for t in range(reach):
+            px = card.getpixel((cx + dx * t, cy + dy * t))
+            if sum(abs(a - b) for a, b in zip(px, bg)) > 60:
+                hits.append(t)
+                break
+    if len(hits) < 4:
+        return default
+    radius = statistics.median(hits) / (1 - 2 ** -0.5)
+    if not (8 <= radius <= 0.25 * min(w, h)):
+        return default
+    return int(round(radius)) + CORNER_RADIUS_PAD
+
+
+def _rounded_mask(size, radius, scale=4):
+    """Anti-aliased rounded-rectangle mask (255 inside)."""
+    w, h = size
+    big = Image.new("L", (w * scale, h * scale), 0)
+    ImageDraw.Draw(big).rounded_rectangle((0, 0, w * scale - 1, h * scale - 1), radius=radius * scale, fill=255)
+    return big.resize((w, h), Image.LANCZOS)
+
+
+_template_cache = {}
+
+
+def _template_path(spec):
+    for name in spec["template_files"]:
+        path = cfg.TEMPLATES_DIR / name
+        if path.exists():
+            return path
+    raise FileNotFoundError(
+        f"No template found. Put it at {cfg.TEMPLATES_DIR / spec['template_files'][0]} "
+        f"(accepted names: {', '.join(spec['template_files'])})")
+
+
+def _load_template(doc_type):
+    """(cropped card image, corner radius). Cached; reloaded if the file changes. Never written back."""
+    spec = cfg.DOCUMENTS[doc_type]
+    path = _template_path(spec)
+    stamp = (str(path), path.stat().st_mtime_ns)
+    cached = _template_cache.get(doc_type)
+    if cached and cached[0] == stamp:
+        return cached[1], cached[2]
+
+    with Image.open(path) as src:
+        card, box = crop_card_template(src.convert("RGB"), spec.get("manual_crop"))
+    radius = spec.get("corner_radius")
+    if radius is None:
+        radius = _detect_corner_radius(card)
+    log.info("Template %s: card box %s, size %s, corner radius %s", path.name, box, card.size, radius)
+    _template_cache[doc_type] = (stamp, card, radius)
+    return card, radius
+
+
+# ---------------------------------------------------------------------------
+# Text
+# ---------------------------------------------------------------------------
+
+_font_cache = {}
+
+
+def _font(path, size):
+    key = (str(path), size)
+    if key not in _font_cache:
+        _font_cache[key] = ImageFont.truetype(str(path), size)
+    return _font_cache[key]
+
+
+def fit_text(text, font_path, box_w, box_h, max_size, min_size, pad_x):
+    """
+    Largest font size (max_size down to min_size) at which the text fits inside the box, so long
+    values shrink instead of overflowing. If it still doesn't fit at min_size, it's cut with "…".
+    Returns (font, text_to_draw).
+    """
+    avail_w = box_w - 2 * pad_x
+    avail_h = box_h - 4
+    size = max_size
+    while size >= min_size:
+        font = _font(font_path, size)
+        left, top, right, bottom = font.getbbox(text, anchor="ls")
+        if (right - left) <= avail_w and (bottom - top) <= avail_h:
+            return font, text
+        size -= 2
+
+    font = _font(font_path, min_size)
+    while len(text) > 1 and font.getlength(text + "…") > avail_w:
+        text = text[:-1]
+    return font, text.rstrip() + "…"
+
+
+def _draw_text_field(draw, text, box, style):
+    left, top, right, bottom = box
+    text = str(text).strip()
+    if style.get("upper"):
+        text = text.upper()
+    if not text:
+        return
+    font, text = fit_text(text, cfg.FONTS[style["font"]], right - left, bottom - top,
+                          style["max_size"], style["min_size"], style.get("pad_x", 20))
+
+    cy = (top + bottom) / 2
+    if style.get("vcenter", "caps") == "ink":
+        l, t, r, b = font.getbbox(text, anchor="ls")
+        baseline = cy - (t + b) / 2
+    else:
+        cap_top = font.getbbox("H", anchor="ls")[1]     # negative: distance from baseline up to cap height
+        baseline = cy - cap_top / 2
+
+    if style.get("align") == "center":
+        draw.text(((left + right) / 2, baseline), text, font=font, fill=style["color"], anchor="ms")
+    else:
+        draw.text((left + style.get("pad_x", 20), baseline), text, font=font, fill=style["color"], anchor="ls")
+
+
+# ---------------------------------------------------------------------------
+# Portrait
+# ---------------------------------------------------------------------------
+
+def prepare_stored_portrait(data):
+    """
+    Validate and shrink an uploaded image for storage (JPEG, longest side <= 1000px, upright).
+    Raises ValueError if the bytes aren't a usable image.
+    """
+    try:
+        with Image.open(io.BytesIO(data)) as img:
+            if img.width * img.height > MAX_SOURCE_PIXELS:
+                raise ValueError("That image is too large.")
+            img = ImageOps.exif_transpose(img)
+            if img.mode in ("RGBA", "LA", "P"):
+                img = img.convert("RGBA")
+                flat = Image.new("RGB", img.size, "white")
+                flat.paste(img, mask=img.split()[-1])
+                img = flat
+            else:
+                img = img.convert("RGB")
+            img.thumbnail((1000, 1000), Image.LANCZOS)
+            out = io.BytesIO()
+            img.save(out, "JPEG", quality=90)
+            return out.getvalue()
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError("That doesn't look like a usable image.") from exc
+
+
+def default_portrait(size):
+    """Plain silhouette used when a player has no portrait and no avatar could be fetched."""
+    w, h = size
+    s = 2
+    img = Image.new("RGB", (w * s, h * s), "#D9E1DC")
+    d = ImageDraw.Draw(img)
+    fg = "#A9B7B0"
+    d.ellipse((w * s * 0.33, h * s * 0.20, w * s * 0.67, h * s * 0.20 + w * s * 0.34), fill=fg)
+    d.ellipse((w * s * 0.12, h * s * 0.62, w * s * 0.88, h * s * 1.25), fill=fg)
+    return img.resize((w, h), Image.LANCZOS)
+
+
+def _portrait_image(data, size, centering):
+    if data:
+        try:
+            with Image.open(io.BytesIO(data)) as img:
+                img = ImageOps.exif_transpose(img).convert("RGB")
+                # cover-crop to the box: scales without stretching, cuts the overflow
+                return ImageOps.fit(img, size, Image.LANCZOS, centering=centering)
+        except Exception:
+            log.warning("Portrait couldn't be read; using the default portrait.")
+    return default_portrait(size)
+
+
+# ---------------------------------------------------------------------------
+# QR code
+# ---------------------------------------------------------------------------
+
+def make_qr_image(data, size, dark="#000000", light="#FFFFFF", quiet_modules=2):
+    """
+    Square QR image, exactly `size` px, with whole-pixel modules (crisp, no blurring) centred in
+    a light quiet zone. Error correction M.
+    """
+    import qrcode
+
+    qr = qrcode.QRCode(version=None, error_correction=qrcode.constants.ERROR_CORRECT_M,
+                       box_size=1, border=0)
+    qr.add_data(data)
+    qr.make(fit=True)
+    matrix = qr.get_matrix()
+    n = len(matrix)
+    unit = size // (n + 2 * quiet_modules)
+    if unit < 2:
+        raise ValueError("QR code is too dense for its box; use a shorter verification URL.")
+    offset = (size - unit * n) // 2
+    img = Image.new("RGB", (size, size), light)
+    d = ImageDraw.Draw(img)
+    for y, row in enumerate(matrix):
+        for x, filled in enumerate(row):
+            if filled:
+                x0, y0 = offset + x * unit, offset + y * unit
+                d.rectangle((x0, y0, x0 + unit - 1, y0 + unit - 1), fill=dark)
+    return img
+
+
+# ---------------------------------------------------------------------------
+# Putting it together
+# ---------------------------------------------------------------------------
+
+def render_document(doc_type, values, portrait_bytes=None, qr_data=None):
+    """
+    Draw one document and return it as PNG bytes (transparent rounded corners).
+      values          {field name: text} for the text fields in the document's config
+      portrait_bytes  image bytes for the portrait field; None -> default portrait
+      qr_data         text for the QR field; None -> QR field left blank
+    """
+    spec = cfg.DOCUMENTS[doc_type]
+    card, radius = _load_template(doc_type)
+    canvas = card.copy()                       # the cached template is never drawn on
+    draw = ImageDraw.Draw(canvas)
+
+    for name, box in spec["fields"].items():
+        kind = spec["image_fields"].get(name)
+        left, top, right, bottom = box
+        size = (right - left, bottom - top)
+
+        if kind == "portrait":
+            photo = _portrait_image(portrait_bytes, size, spec.get("portrait_centering", (0.5, 0.3)))
+            canvas.paste(photo, (left, top), _rounded_mask(size, spec.get("portrait_corner_radius", 0)))
+        elif kind == "qr":
+            if qr_data:
+                side = min(size)
+                qr = make_qr_image(qr_data, side, dark=spec.get("qr_dark", "#000000"))
+                canvas.paste(qr, (left + (size[0] - side) // 2, top + (size[1] - side) // 2))
+        elif name in values and values[name] not in (None, ""):
+            _draw_text_field(draw, values[name], box, spec["text_styles"][name])
+
+    out = canvas.convert("RGBA")
+    out.putalpha(_rounded_mask(out.size, radius))
+    buf = io.BytesIO()
+    out.save(buf, "PNG", compress_level=6)
+    return buf.getvalue()

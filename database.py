@@ -152,6 +152,43 @@ async def init_db():
             """
         )
 
+        # A player's portrait (shared by every document: NIN card, later permits, licences, ...).
+        # Stored as image bytes because Render's disk is wiped on every restart.
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS player_portraits (
+                player_id   INTEGER PRIMARY KEY REFERENCES players(player_id) ON DELETE CASCADE,
+                image       BYTEA NOT NULL,
+                updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            """
+        )
+
+        # One row per NIN card. document_number is permanent: a re-rendered card reuses it.
+        # due_at = when the card should reach parcel-pickup; sent_at = when it did (NULL = not yet).
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS nin_cards (
+                player_id            INTEGER PRIMARY KEY REFERENCES players(player_id) ON DELETE CASCADE,
+                document_number      TEXT NOT NULL UNIQUE,
+                full_name            TEXT NOT NULL,
+                nin                  TEXT NOT NULL,
+                date_of_birth        DATE NOT NULL,
+                sex                  TEXT NOT NULL DEFAULT '',
+                nationality          TEXT NOT NULL,
+                state_of_origin      TEXT NOT NULL,
+                date_of_registration DATE NOT NULL,
+                issue_state          TEXT NOT NULL,
+                created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                due_at               TIMESTAMPTZ NOT NULL,
+                sent_at              TIMESTAMPTZ
+            );
+            """
+        )
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS nin_cards_due_idx ON nin_cards (due_at) WHERE sent_at IS NULL;"
+        )
+
         await conn.execute(
             """
             CREATE TABLE IF NOT EXISTS settings (
@@ -534,6 +571,86 @@ async def assign_nin(player_id: int, state: str):
             if result != "UPDATE 1":
                 return None
             return nin
+
+
+# ---------------------------------------------------------------------------
+# Portraits and NIN cards
+# ---------------------------------------------------------------------------
+
+async def set_portrait(player_id: int, image: bytes):
+    async with get_pool().acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO player_portraits (player_id, image) VALUES ($1, $2)
+            ON CONFLICT (player_id) DO UPDATE SET image = EXCLUDED.image, updated_at = NOW();
+            """,
+            player_id, image,
+        )
+
+
+async def get_portrait(player_id: int):
+    """The stored portrait bytes, or None."""
+    async with get_pool().acquire() as conn:
+        return await conn.fetchval("SELECT image FROM player_portraits WHERE player_id = $1;", player_id)
+
+
+async def delete_portrait(player_id: int) -> bool:
+    async with get_pool().acquire() as conn:
+        result = await conn.execute("DELETE FROM player_portraits WHERE player_id = $1;", player_id)
+        return result == "DELETE 1"
+
+
+async def create_nin_card(player_id, document_number, full_name, nin, date_of_birth, sex, nationality,
+                          state_of_origin, date_of_registration, issue_state, due_at):
+    """
+    Store a player's NIN card record. If they already have one it is left untouched (so the
+    document number never changes) and the existing record is returned.
+    """
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO nin_cards (player_id, document_number, full_name, nin, date_of_birth, sex,
+                                   nationality, state_of_origin, date_of_registration, issue_state, due_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            ON CONFLICT (player_id) DO NOTHING
+            RETURNING *;
+            """,
+            player_id, document_number, full_name, nin, date_of_birth, sex, nationality,
+            state_of_origin, date_of_registration, issue_state, due_at,
+        )
+        if row is None:
+            row = await conn.fetchrow("SELECT * FROM nin_cards WHERE player_id = $1;", player_id)
+        return row
+
+
+async def get_nin_card_by_player(player_id: int):
+    async with get_pool().acquire() as conn:
+        return await conn.fetchrow("SELECT * FROM nin_cards WHERE player_id = $1;", player_id)
+
+
+async def get_nin_card_by_document(document_number: str):
+    async with get_pool().acquire() as conn:
+        return await conn.fetchrow("SELECT * FROM nin_cards WHERE document_number = $1;", document_number)
+
+
+async def get_due_nin_cards(limit: int = 10):
+    """Cards whose time has come and that haven't been sent yet, oldest first, with the player's discord_id."""
+    async with get_pool().acquire() as conn:
+        return await conn.fetch(
+            """
+            SELECT c.*, p.discord_id
+            FROM nin_cards c JOIN players p ON p.player_id = c.player_id
+            WHERE c.sent_at IS NULL AND c.due_at <= NOW()
+            ORDER BY c.due_at
+            LIMIT $1;
+            """,
+            limit,
+        )
+
+
+async def mark_nin_card_sent(player_id: int):
+    async with get_pool().acquire() as conn:
+        await conn.execute("UPDATE nin_cards SET sent_at = NOW() WHERE player_id = $1;", player_id)
 
 
 # ---------------------------------------------------------------------------
