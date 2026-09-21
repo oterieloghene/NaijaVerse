@@ -57,9 +57,10 @@ async def _phone_screen(level):
 
 
 async def _show(interaction, embed, view):
-    """Replace what the person sees. Edits the phone message; falls back to a new private one."""
+    """Replace what the person sees, keeping the phone picture attached to the message."""
+    embed.set_image(url="attachment://phone.png")         # the already-attached image stays visible
     if interaction.message is not None:
-        await interaction.response.edit_message(embed=embed, view=view, attachments=[])
+        await interaction.response.edit_message(embed=embed, view=view)
     else:
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
@@ -88,7 +89,7 @@ def _bank_menu_embed(account):
         title=f"🏦 {msgs.bank_name(account['state'])}",
         description="What would you like to do?",
         colour=bcfg.TIERS[account["tier"]]["colour"],
-    )
+    ).set_image(url="attachment://phone.png")
 
 
 class OwnedView(discord.ui.View):
@@ -182,7 +183,7 @@ async def open_bank(interaction):
     if not await _battery_ok(interaction, player):
         return
     await interaction.edit_original_response(embed=_bank_menu_embed(account),
-                                             view=BankMenuView(interaction.user.id), attachments=[])
+                                             view=BankMenuView(interaction.user.id))
 
 
 async def show_bank_menu(interaction):
