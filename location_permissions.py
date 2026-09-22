@@ -20,10 +20,18 @@ applies them with personal (per-member) overwrites on the location channels:
              (HIDE_NOT_AT_PARENT), e.g. banking-office/atm/deposit stay hidden until the
              player's current_sub_location is banking-hall, even if their roles would
              otherwise let them in. Parent locations are unaffected (always role-gated
-             only), and non_physical/voice_channel sub-locations are exempt (e.g.
-             transaction-log, council-voice) - those stay visible by role alone.
+             only). Only non_physical sub-locations are exempt from this gate (e.g.
+             transaction-log, treasury) - those stay visible by role alone. Voice
+             sub-locations (e.g. council-voice) are NOT exempt: they're gated like any
+             other physical sub-location.
          A hide is only added where the player would otherwise be able to see the channel,
          so the number of overwrites stays small.
+
+  HISTORY  Parent locations also get a personal "Read Message History: allow" for any
+           player who passes the parent's own role rules (locations.py), regardless of
+           current_sub_location - so someone who can see banking-hall but isn't there yet
+           can still read what's already been posted; they still can't write there. Only
+           parent locations get this grant, not sub-locations.
 
 One-time Discord setup: deny Send Messages for @everyone and the state roles on every location
 channel. Viewing stays role-gated exactly as you have it now. Personal overwrites beat role
@@ -60,6 +68,7 @@ REASON = "Location permissions"
 HIDE_OTHER_STATES = True     # can't see channels of a state you're not in
 HIDE_FAILED_ACCESS = True    # in your own state, hide channels that fail the full role rules
 HIDE_NOT_AT_PARENT = True    # hide physical sub-locations until you're at their parent
+GRANT_HISTORY_AT_PARENT = True  # let players read a parent's backlog once they pass its role rules
 
 _LEADING_DECORATION = re.compile(r"^[^a-z0-9]+")
 _locks: dict[int, asyncio.Lock] = {}
@@ -97,19 +106,37 @@ def _always_read_only(node):
     return node["non_physical"] or node["voice_channel"]
 
 
+def _exempt_from_parent_gate(node):
+    """
+    Sub-locations that skip HIDE_NOT_AT_PARENT entirely (visible by role alone, no
+    "arrive to reveal" gate). Only non_physical ones qualify now - voice_channel subs
+    are gated like any other physical sub-location.
+    """
+    return node["non_physical"]
+
+
 def sub_parent_map(state):
     """
-    {sub_code: parent_code} for every PHYSICAL sub-location in a state - the ones
-    HIDE_NOT_AT_PARENT applies to. non_physical and voice_channel sub-locations are left
-    out on purpose: they're always visible by role alone, with no "arrive to reveal" gate.
+    {sub_code: parent_code} for every sub-location in a state that HIDE_NOT_AT_PARENT
+    applies to - i.e. every sub-location except the non_physical ones (see
+    _exempt_from_parent_gate). Voice sub-locations ARE included: they're hidden until
+    the player's current_sub_location is the parent, same as any other physical sub.
     """
     parents = {}
     for category in LOCATIONS.get(state, {}).values():
         for parent_code, location in category["locations"].items():
             for sub_code, sub in location["sub_locations"].items():
-                if not _always_read_only(sub):
+                if not _exempt_from_parent_gate(sub):
                     parents[sub_code] = parent_code
     return parents
+
+
+def parent_codes(state):
+    """Codes that are top-level (parent) locations in a state, not sub-locations."""
+    codes = set()
+    for category in LOCATIONS.get(state, {}).values():
+        codes.update(category["locations"])
+    return codes
 
 
 def expected_codes(state):
@@ -190,11 +217,12 @@ async def writable_codes(member, player):
 # Applying permissions
 # ---------------------------------------------------------------------------
 
-async def _apply(channel, member, write, hide):
+async def _apply(channel, member, write, hide, history=False):
     """
     Make the member's personal overwrite on a channel match the wanted state.
-      write  True -> personal Send Messages allow; False -> remove it
-      hide   True -> personal View Channel deny (only if they'd otherwise see it); False -> remove it
+      write    True -> personal Send Messages allow; False -> remove it
+      hide     True -> personal View Channel deny (only if they'd otherwise see it); False -> remove it
+      history  True -> personal Read Message History allow; False -> remove it
     Returns True if anything changed.
     """
     overwrite = channel.overwrites_for(member)
@@ -204,6 +232,12 @@ async def _apply(channel, member, write, hide):
         wanted = True if write else None
         if overwrite.send_messages != wanted:
             overwrite.send_messages = wanted
+            changed = True
+
+    if overwrite.read_message_history is not False:   # explicit member-level deny: leave alone
+        wanted = True if history else None
+        if overwrite.read_message_history != wanted:
+            overwrite.read_message_history = wanted
             changed = True
 
     if hide:
@@ -250,22 +284,25 @@ async def sync_member_permissions(member):
         for state in STATES:
             nodes = location_nodes(state)
             parents = sub_parent_map(state) if state == here_state else None
+            top_level = parent_codes(state) if state == here_state else None
             for code, channel in state_location_channels(member.guild, state).items():
                 if state == here_state:
                     write = code in writable
-                    fails_role = HIDE_FAILED_ACCESS and not await may_see(
-                        role_names, player["player_id"], state, nodes[code])
+                    role_access = await may_see(role_names, player["player_id"], state, nodes[code])
+                    fails_role = HIDE_FAILED_ACCESS and not role_access
                     not_at_parent = (
                         HIDE_NOT_AT_PARENT
                         and parents.get(code) is not None
                         and here_sub_location != parents[code]
                     )
                     hide = fails_role or not_at_parent
+                    history = GRANT_HISTORY_AT_PARENT and code in top_level and role_access
                 else:
                     write = False
                     hide = HIDE_OTHER_STATES
+                    history = False
                 try:
-                    await _apply(channel, member, write, hide)
+                    await _apply(channel, member, write, hide, history)
                 except discord.HTTPException as exc:
                     print(f"[permissions] Couldn't update #{channel.name} for {member}: {exc}")
 
@@ -276,7 +313,7 @@ async def clear_member_permissions(member):
         for state in STATES:
             for channel in state_location_channels(member.guild, state).values():
                 try:
-                    await _apply(channel, member, write=False, hide=False)
+                    await _apply(channel, member, write=False, hide=False, history=False)
                 except discord.HTTPException as exc:
                     print(f"[permissions] Couldn't clear #{channel.name} for {member}: {exc}")
     _locks.pop(member.id, None)
