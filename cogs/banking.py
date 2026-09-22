@@ -10,7 +10,13 @@ bank_messages.py; the tiers, limits, fee and tax live in bank_config.py.
   ATM                           !bal                          check your balance
                                 !transfer <@player | account number> <amount> [narration]
                                 !with <amount>                bank balance -> your cash
-  Admins                        !open-org-account <state> <name>   makes a business/organisation account
+  Admins                        !create-org-account <state> <name> <#receipt-channel>
+  Accountant/Bank Mgr/Exec Dir  !close-account <@player | account number>   (must be zero balance)
+  Bank Manager / Exec Director  !view-balances                the state's balances, DM'd to you
+                                !bank-debit @player <amount> [narration]
+                                !bank-credit @player <amount> [narration]
+  Auditor / Bank Manager        !statement @player            their last 15 transactions
+                                !send-statement @customer @recipient
 
 Amounts accept 50000, 50,000, ₦50,000, 50k, 1.5m.
 Every transaction is posted to the transaction-log of the state the sender's account was opened in,
@@ -40,7 +46,12 @@ USAGE = {
     "transfer": "Usage: `!transfer <@player or 10-digit account number> <amount> [narration]`",
     "with": "Usage: `!with <amount>`",
     "dep": "Usage: `!dep @player <amount>`",
-    "open-org-account": "Usage: `!open-org-account <Delta|Lagos|Abuja> <organisation name>`",
+    "create-org-account": "Usage: `!create-org-account <Delta|Lagos|Abuja> <organisation name> <#receipt-channel>`",
+    "close-account": "Usage: `!close-account <@player | account number>`",
+    "statement": "Usage: `!statement @player`",
+    "send-statement": "Usage: `!send-statement @customer @recipient`",
+    "bank-debit": "Usage: `!bank-debit @player <amount> [narration]`",
+    "bank-credit": "Usage: `!bank-credit @player <amount> [narration]`",
 }
 
 
@@ -82,6 +93,32 @@ class Banking(commands.Cog):
             await ctx.send("You don't have a bank account yet. Visit the banking office to open one.")
             return None
         return player, account
+
+    async def _account_of(self, member):
+        """A member's personal account row, or None if they don't have one."""
+        player = await database.get_player_by_discord_id(member.id)
+        if not player:
+            return None
+        return await bank.get_account_by_player(player["player_id"])
+
+    async def _resolve_account(self, ctx, target):
+        """An account (personal via @mention, or any account via its 10-digit number), or None
+        after telling the user why not. Used by !close-account, which closes org accounts too."""
+        target = target.strip()
+        mention = re.fullmatch(r"<@!?(\d+)>", target)
+        if mention:
+            player = await database.get_player_by_discord_id(int(mention.group(1)))
+            account = await bank.get_account_by_player(player["player_id"]) if player else None
+            if account is None:
+                await ctx.send("That player doesn't have a bank account.")
+            return account
+        if re.fullmatch(r"\d{%d}" % cfg.ACCOUNT_NUMBER_LENGTH, target):
+            account = await bank.get_account_by_number(target)
+            if account is None:
+                await ctx.send("No account exists with that number.")
+            return account
+        await ctx.send("Give an @player mention or a 10-digit account number.")
+        return None
 
     def _may_change_tier(self, member):
         if member.guild_permissions.administrator:
@@ -179,21 +216,159 @@ class Banking(commands.Cog):
                        allowed_mentions=NO_PINGS)
         await msgs.announce_transaction(self.bot, ctx.guild, result)
 
-    @commands.command(name="open-org-account")
+    @commands.command(name="create-org-account")
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
-    async def open_org_account(self, ctx, state: str, *, name: str):
-        """!open-org-account <state> <name>: a business / organisation account for 'Send to Business'"""
+    async def create_org_account(self, ctx, state: str, *, rest: str):
+        """!create-org-account <state> <organisation name> <#receipt-channel>: opens a business
+        account and sets which channel its payment receipts drop in, e.g.
+        !create-org-account Delta Delta Police Department #police-station"""
         match = next((s for s in LOCATIONS if s.casefold() == state.casefold()), None)
         if match is None:
             await ctx.send("State must be one of: " + ", ".join(LOCATIONS) + ".")
             return
+
+        name, _, channel_token = rest.strip().rpartition(" ")
+        name, channel_token = name.strip(), channel_token.strip()
+        if not name or not channel_token:
+            await ctx.send(USAGE["create-org-account"])
+            return
         try:
-            account = await bank.create_org_account(match, name.strip())
+            channel = await commands.TextChannelConverter().convert(ctx, channel_token)
+        except commands.BadArgument:
+            await ctx.send("I couldn't find that receipt channel. Mention it (#channel) or give its exact name, "
+                           "as the last word of the command.")
+            return
+
+        try:
+            account = await bank.create_org_account(match, name, channel.id)
         except BankError as err:
             await ctx.send(err.message)
             return
-        await ctx.send(f"✅ **{account['display_name']}** ({match}) account number: `{account['account_number']}`")
+        await ctx.send(f"✅ **{account['display_name']}** ({match}) account number: `{account['account_number']}`\n"
+                       f"Receipts for payments in will post to {channel.mention}.")
+
+    @commands.command(name="close-account")
+    @commands.guild_only()
+    async def close_account(self, ctx, target: str):
+        """!close-account <@player | account number>: closes a personal or org account
+        (Accountant, Bank Manager, or Executive Director). Only works if the balance is zero."""
+        if not self._may_change_tier(ctx.author):
+            await ctx.send("Only an Accountant, Bank Manager or Executive Director can close accounts.")
+            return
+        account = await self._resolve_account(ctx, target)
+        if account is None:
+            return
+        try:
+            closed = await bank.close_account(account["account_id"])
+        except BankError as err:
+            await ctx.send(err.message)
+            return
+        await ctx.send(f"✅ **{closed['display_name']}**'s account (`{closed['account_number']}`) "
+                       f"has been closed and removed.")
+
+    @commands.command(name="view-balances")
+    @commands.guild_only()
+    async def view_balances(self, ctx):
+        """!view-balances  (Bank Manager / Executive Director): the state's customer, org, bank
+        account and treasury balances, sent to your DMs."""
+        if not cfg.member_has_role(ctx.author, cfg.BANK_MANAGER_ROLE_NAMES):
+            await ctx.send("Only a Bank Manager or Executive Director can use this.")
+            return
+        state = state_of_channel(ctx.channel)
+        if state is None:
+            await ctx.send("Use this inside a state's channels so I know which state to report on.")
+            return
+        data = await bank.state_balances(state)
+        try:
+            await ctx.author.send(embed=msgs.state_balances_embed(state, data))
+            await ctx.send("📬 Sent to your DMs.", delete_after=8)
+        except discord.HTTPException:
+            await ctx.send("⚠️ I couldn't DM you (your DMs are closed).")
+
+    @commands.command(name="statement")
+    @commands.guild_only()
+    async def statement(self, ctx, member: discord.Member):
+        """!statement @player  (Auditor / Bank Manager): their last 15 transactions."""
+        if not cfg.member_has_role(ctx.author, cfg.AUDIT_ROLE_NAMES):
+            await ctx.send("Only an Auditor or Bank Manager can use this.")
+            return
+        account = await self._account_of(member)
+        if account is None:
+            await ctx.send("That player doesn't have a bank account.")
+            return
+        txs = await bank.recent_transactions(account["account_id"], limit=15)
+        await ctx.send(embed=msgs.statement_embed(account, txs))
+
+    @commands.command(name="send-statement")
+    @commands.guild_only()
+    async def send_statement(self, ctx, customer: discord.Member, recipient: discord.Member):
+        """!send-statement @customer @recipient  (Auditor / Bank Manager): DMs their statement to someone."""
+        if not cfg.member_has_role(ctx.author, cfg.AUDIT_ROLE_NAMES):
+            await ctx.send("Only an Auditor or Bank Manager can use this.")
+            return
+        account = await self._account_of(customer)
+        if account is None:
+            await ctx.send("That player doesn't have a bank account.")
+            return
+        txs = await bank.recent_transactions(account["account_id"], limit=15)
+        try:
+            await recipient.send(embed=msgs.statement_embed(account, txs))
+        except discord.HTTPException:
+            await ctx.send("⚠️ I couldn't DM them (their DMs are closed).")
+            return
+        await ctx.send(f"📬 Sent {customer.display_name}'s statement to {recipient.display_name}.",
+                       allowed_mentions=NO_PINGS)
+
+    @commands.command(name="bank-debit")
+    @commands.guild_only()
+    async def bank_debit(self, ctx, member: discord.Member, amount: str, *, narration: str = ""):
+        """!bank-debit @player <amount> [narration]  (Bank Manager / Executive Director):
+        moves money from a player's bank balance into their state's bank account."""
+        if not cfg.member_has_role(ctx.author, cfg.BANK_MANAGER_ROLE_NAMES):
+            await ctx.send("Only a Bank Manager or Executive Director can use this.")
+            return
+        account = await self._account_of(member)
+        if account is None:
+            await ctx.send("That player doesn't have a bank account.")
+            return
+        try:
+            value = cfg.parse_amount(amount)
+        except ValueError as err:
+            await ctx.send(str(err))
+            return
+        try:
+            result = await bank.bank_debit(account["account_id"], value, narration)
+        except BankError as err:
+            await ctx.send(err.message)
+            return
+        await ctx.send(f"✅ {cfg.money(value)} moved from **{member.display_name}** to the state bank account "
+                       f"· Ref {result['ref']}", allowed_mentions=NO_PINGS)
+
+    @commands.command(name="bank-credit")
+    @commands.guild_only()
+    async def bank_credit(self, ctx, member: discord.Member, amount: str, *, narration: str = ""):
+        """!bank-credit @player <amount> [narration]  (Bank Manager / Executive Director):
+        moves money from the state's bank account into a player's bank balance."""
+        if not cfg.member_has_role(ctx.author, cfg.BANK_MANAGER_ROLE_NAMES):
+            await ctx.send("Only a Bank Manager or Executive Director can use this.")
+            return
+        account = await self._account_of(member)
+        if account is None:
+            await ctx.send("That player doesn't have a bank account.")
+            return
+        try:
+            value = cfg.parse_amount(amount)
+        except ValueError as err:
+            await ctx.send(str(err))
+            return
+        try:
+            result = await bank.bank_credit(account["account_id"], value, narration)
+        except BankError as err:
+            await ctx.send(err.message)
+            return
+        await ctx.send(f"✅ {cfg.money(value)} moved from the state bank account to **{member.display_name}** "
+                       f"· Ref {result['ref']}", allowed_mentions=NO_PINGS)
 
     # --- ATM commands -------------------------------------------------------------------
 
