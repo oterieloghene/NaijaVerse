@@ -15,7 +15,13 @@ applies them with personal (per-member) overwrites on the location channels:
            - every channel of a state they are NOT in (HIDE_OTHER_STATES), e.g. a Delta
              house resident who moved to Lagos can't still see Delta's channels;
            - inside their own state, channels whose full rules from locations.py they fail
-             (HIDE_FAILED_ACCESS), e.g. has the job role but not "<State> Employee".
+             (HIDE_FAILED_ACCESS), e.g. has the job role but not "<State> Employee";
+           - physical sub-locations whose parent the player isn't currently at
+             (HIDE_NOT_AT_PARENT), e.g. banking-office/atm/deposit stay hidden until the
+             player's current_sub_location is banking-hall, even if their roles would
+             otherwise let them in. Parent locations are unaffected (always role-gated
+             only), and non_physical/voice_channel sub-locations are exempt (e.g.
+             transaction-log, council-voice) - those stay visible by role alone.
          A hide is only added where the player would otherwise be able to see the channel,
          so the number of overwrites stays small.
 
@@ -53,6 +59,7 @@ REASON = "Location permissions"
 
 HIDE_OTHER_STATES = True     # can't see channels of a state you're not in
 HIDE_FAILED_ACCESS = True    # in your own state, hide channels that fail the full role rules
+HIDE_NOT_AT_PARENT = True    # hide physical sub-locations until you're at their parent
 
 _LEADING_DECORATION = re.compile(r"^[^a-z0-9]+")
 _locks: dict[int, asyncio.Lock] = {}
@@ -88,6 +95,21 @@ def location_nodes(state):
 
 def _always_read_only(node):
     return node["non_physical"] or node["voice_channel"]
+
+
+def sub_parent_map(state):
+    """
+    {sub_code: parent_code} for every PHYSICAL sub-location in a state - the ones
+    HIDE_NOT_AT_PARENT applies to. non_physical and voice_channel sub-locations are left
+    out on purpose: they're always visible by role alone, with no "arrive to reveal" gate.
+    """
+    parents = {}
+    for category in LOCATIONS.get(state, {}).values():
+        for parent_code, location in category["locations"].items():
+            for sub_code, sub in location["sub_locations"].items():
+                if not _always_read_only(sub):
+                    parents[sub_code] = parent_code
+    return parents
 
 
 def expected_codes(state):
@@ -221,16 +243,24 @@ async def sync_member_permissions(member):
             return
 
         here_state = player["current_state"]
+        here_sub_location = player["current_sub_location"]
         role_names = [r.name for r in member.roles]
         writable = await writable_codes(member, player)
 
         for state in STATES:
             nodes = location_nodes(state)
+            parents = sub_parent_map(state) if state == here_state else None
             for code, channel in state_location_channels(member.guild, state).items():
                 if state == here_state:
                     write = code in writable
-                    hide = HIDE_FAILED_ACCESS and not await may_see(
+                    fails_role = HIDE_FAILED_ACCESS and not await may_see(
                         role_names, player["player_id"], state, nodes[code])
+                    not_at_parent = (
+                        HIDE_NOT_AT_PARENT
+                        and parents.get(code) is not None
+                        and here_sub_location != parents[code]
+                    )
+                    hide = fails_role or not_at_parent
                 else:
                     write = False
                     hide = HIDE_OTHER_STATES
@@ -269,6 +299,7 @@ async def audit_member(member, player):
         missing         {state: [codes with no matching channel in the server]}
     """
     here_state = player["current_state"]
+    here_sub_location = player["current_sub_location"]
     role_names = [r.name for r in member.roles]
     result = {"writable": [], "locked": 0, "leaked": [], "rule_failures": [],
               "hidden_wrongly": [], "missing": {}}
@@ -276,6 +307,7 @@ async def audit_member(member, player):
     for state in STATES:
         channels = state_location_channels(member.guild, state)
         nodes = location_nodes(state)
+        parents = sub_parent_map(state) if state == here_state else None
         result["missing"][state] = sorted(set(nodes) - set(channels))
 
         for code, channel in sorted(channels.items()):
@@ -291,6 +323,9 @@ async def audit_member(member, player):
             else:
                 result["locked"] += 1
             allowed = await may_see(role_names, player["player_id"], state, nodes[code])
+            if allowed and HIDE_NOT_AT_PARENT and parents.get(code) is not None \
+                    and here_sub_location != parents[code]:
+                allowed = False                         # correctly hidden: not at its parent yet
             if perms.view_channel and not allowed:
                 result["rule_failures"].append(code)
             elif allowed and not perms.view_channel:
