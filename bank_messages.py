@@ -211,6 +211,71 @@ def error_embed(message):
 
 
 # ---------------------------------------------------------------------------
+# Org account receipts (posted to the account's own receipt channel, set at !create-org-account)
+# ---------------------------------------------------------------------------
+
+_RECEIPT_LINE = "▬" * 24
+
+
+def org_receipt_embed(result):
+    """The receipt dropped in an org account's receipt channel for every payment INTO it."""
+    receiver = result["receiver"]
+    sender = result["sender"]
+    lines = [
+        _RECEIPT_LINE,
+        f"Sender: {sender['display_name']}",
+        f"Account no: `{sender['account_number']}`",
+        f"Amount: {cfg.money(result['amount'])}",
+        f"Narration: {result['narration'] or '—'}",
+        _RECEIPT_LINE,
+        f"Ref: {result['ref']} · {result['created_at'].astimezone(cfg.WAT).strftime('%d %b %Y, %H:%M WAT')}",
+    ]
+    return _embed(f"🧾 {receiver['display_name']}", lines, GREEN)
+
+
+# ---------------------------------------------------------------------------
+# !statement / !send-statement
+# ---------------------------------------------------------------------------
+
+def statement_embed(account, transactions):
+    """The account's last N transactions (bank_database.recent_transactions rows)."""
+    lines = [SEP, f"Account No.: `{account['account_number']}`", f"Balance: {cfg.money(account['balance'])}", SEP]
+    if not transactions:
+        lines.append("No transactions yet.")
+    for tx in transactions:
+        direction = "OUT" if tx["from_account"] == account["account_id"] else "IN"
+        other = tx["to_name"] if direction == "OUT" else tx["from_name"]
+        arrow = "🔴" if direction == "OUT" else "🟢"
+        when = tx["created_at"].astimezone(cfg.WAT).strftime("%d %b, %H:%M")
+        lines.append(f"{arrow} {tx['kind'].title()} · {cfg.money(tx['amount'])} "
+                     f"{'to' if direction == 'OUT' else 'from'} {other or '—'} · {when} · Ref {tx['ref']}")
+    return _embed(f"📜 Statement — {account['display_name']}", lines, BLUE)
+
+
+# ---------------------------------------------------------------------------
+# !view-balances
+# ---------------------------------------------------------------------------
+
+def _balance_lines(accounts, limit=20):
+    if not accounts:
+        return ["None."]
+    lines = [f"{a['display_name']} (`{a['account_number']}`): {cfg.money(a['balance'])}" for a in accounts[:limit]]
+    if len(accounts) > limit:
+        lines.append(f"…and {len(accounts) - limit} more.")
+    return lines
+
+
+def state_balances_embed(state, data):
+    lines = [f"**Customers ({len(data['customers'])})**", *_balance_lines(data["customers"]), "",
+             f"**Organisations ({len(data['orgs'])})**", *_balance_lines(data["orgs"]), "",
+             "**State bank account**",
+             cfg.money(data["state_bank"]["balance"]) if data["state_bank"] else cfg.money(0), "",
+             "**State treasury**",
+             cfg.money(data["treasury"]["balance"]) if data["treasury"] else cfg.money(0)]
+    return _embed(f"📊 {state} — Balances", lines, BLUE)
+
+
+# ---------------------------------------------------------------------------
 # Sending a finished transaction out: transaction-log + DMs
 # ---------------------------------------------------------------------------
 
@@ -247,3 +312,12 @@ async def announce_transaction(bot, guild, result):
             await _dm(bot, result["receiver"]["discord_id"], credit_alert(result))
     except Exception as exc:
         print(f"[bank] couldn't send alerts for {result['ref']}: {exc!r}")
+
+    receiver = result.get("receiver")
+    if receiver and receiver.get("account_type") == "org" and receiver.get("receipt_channel_id"):
+        try:
+            channel = guild.get_channel(receiver["receipt_channel_id"]) \
+                or await bot.fetch_channel(receiver["receipt_channel_id"])
+            await channel.send(embed=org_receipt_embed(result))
+        except Exception as exc:
+            print(f"[bank] couldn't post receipt for {result['ref']}: {exc!r}")

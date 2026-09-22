@@ -73,7 +73,29 @@ LOG_CHANNEL = "transaction-log"          # every transaction is posted here (in 
 # "Accountant" also matches "Delta Accountant". Add or remove names when you settle the hierarchy.
 UPGRADE_ROLE_NAMES = ("Accountant", "Bank Manager", "Executive Director")
 
+# Role sets for the new commands. Same end-of-name, case-insensitive matching as above.
+# "State Bank Manager" is the plain "Bank Manager" role — no separate role needed.
+BANK_MANAGER_ROLE_NAMES = ("Bank Manager", "Executive Director")   # !view-balances, !bank-debit, !bank-credit
+AUDIT_ROLE_NAMES = ("Auditor", "Bank Manager")                     # !statement, !send-statement
+CBN_ROLE_NAMES = ("CBN Governor", "CBN Deputy")                    # !print, !cb-with
+
+# A single row, not tied to any state: account_type = 'national_treasury'.
+NATIONAL_TREASURY_STATE = "National"
+
+# --- CBN vault -------------------------------------------------------------------------------
+VAULT_CHANNEL = "vault"                  # !print  !cb-with  (and where the batch/withdrawal posts go)
+PRINT_CHUNK = Decimal("100000000")       # ₦100,000,000 per batch
+PRINT_SECONDS_PER_CHUNK = 60             # 1 minute per ₦100,000,000
+
 MAX_AMOUNT = Decimal("1000000000000")    # sanity ceiling for a single typed amount
+
+
+def member_has_role(member, names):
+    """True if `member` is an admin, or has a role whose name ends with one of `names` (case-insensitive)."""
+    if member.guild_permissions.administrator:
+        return True
+    keys = [n.casefold() for n in names]
+    return any(role.name.casefold().endswith(k) for role in member.roles for k in keys)
 
 ACCOUNT_NUMBER_LENGTH = 10
 TX_REF_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"   # no I, L, O, 0, 1: hard to misread

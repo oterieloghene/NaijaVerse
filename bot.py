@@ -45,7 +45,7 @@ class RPBot(commands.Bot):
         except Exception as exc:        # e.g. Pillow not installed yet: the rest of the bot still runs
             print(f"NIN card delivery NOT loaded: {exc!r}")
         # banking must load before the phone: the phone's Bank app uses the bank tables
-        for extension in ("cogs.banking", "cogs.phone"):
+        for extension in ("cogs.banking", "cogs.phone", "cogs.cbn"):
             try:
                 await self.load_extension(extension)
             except Exception as exc:
