@@ -20,12 +20,16 @@ import io
 
 import discord
 from discord.ext import commands, tasks
+from PIL import Image
 
 import database
 import document_config as cfg
 from document_renderer import prepare_stored_portrait
 from location_permissions import state_location_channels
 from nin_card import generate_nin_card, sample_card_data
+
+MAX_SPLIT_PIXELS = 30_000_000
+MAX_GRID_CELLS = 60
 
 MAX_UPLOAD_BYTES = 8 * 1024 * 1024
 NO_PINGS = discord.AllowedMentions.none()
@@ -89,7 +93,8 @@ class NinDelivery(commands.Cog):
                       f"card {row['document_number']} will be sent once it exists.")
             return
 
-        portrait = await database.get_portrait(row["player_id"]) or await _avatar_bytes(member)
+        gender = (await database.get_player_by_discord_id(member.id) or {}).get("gender") or "Male"
+        portrait = await database.get_effective_portrait(row["player_id"], gender)
         png = await generate_nin_card(row, portrait_bytes=portrait)
 
         await channel.send(
@@ -150,11 +155,72 @@ class NinDelivery(commands.Cog):
                 await ctx.send(f"{member.mention} has no NIN card record yet (they need to be immigrated).",
                                allowed_mentions=NO_PINGS)
                 return
-            portrait = await database.get_portrait(player["player_id"]) or await _avatar_bytes(member)
+            portrait = await database.get_effective_portrait(player["player_id"], player.get("gender") or "Male")
 
         async with ctx.typing():
             png = await generate_nin_card(data, portrait_bytes=portrait)
         await ctx.send(file=discord.File(io.BytesIO(png), filename="nin_card.png"))
+
+    @commands.command(name="splitportraits")
+    @commands.guild_only()
+    @commands.has_permissions(administrator=True)
+    async def split_portraits(self, ctx, gender: str, grid: str = "1x1"):
+        """
+        !splitportraits <male|female> <RxC> — attach a collage image; it's sliced into an RxC
+        grid and every cell is added to the stock portrait archive for that gender.
+        e.g. !splitportraits male 2x2
+        """
+        gender = gender.capitalize()
+        if gender not in ("Male", "Female"):
+            await ctx.send("Gender must be `male` or `female`.")
+            return
+        try:
+            rows_s, cols_s = grid.lower().split("x")
+            rows, cols = int(rows_s), int(cols_s)
+            assert 1 <= rows * cols <= MAX_GRID_CELLS
+        except Exception:
+            await ctx.send(f"Grid must look like `2x2` (max {MAX_GRID_CELLS} cells).")
+            return
+        if not ctx.message.attachments:
+            await ctx.send("Attach the collage image to the message.")
+            return
+
+        attachment = ctx.message.attachments[0]
+        if attachment.size > MAX_UPLOAD_BYTES:
+            await ctx.send("That image is too big (limit 8 MB).")
+            return
+
+        try:
+            added = await asyncio.to_thread(
+                self._split_and_prepare, await attachment.read(), rows, cols)
+        except ValueError as exc:
+            await ctx.send(str(exc))
+            return
+
+        count = await database.add_archive_portraits(gender, added)
+        counts = await database.archive_counts()
+        await ctx.send(f"Added {count} portrait(s) to the {gender} archive. "
+                       f"Free right now — Male: {counts.get('Male', 0)}, Female: {counts.get('Female', 0)}.")
+
+    @staticmethod
+    def _split_and_prepare(data, rows, cols):
+        """Bytes of a collage -> list of prepared JPEG bytes, one per grid cell, evenly sliced."""
+        with Image.open(io.BytesIO(data)) as img:
+            if img.width * img.height > MAX_SPLIT_PIXELS:
+                raise ValueError("That image is too large.")
+            img = img.convert("RGB")
+            w, h = img.width // cols, img.height // rows
+            if w < 100 or h < 100:
+                raise ValueError(f"A {rows}x{cols} grid on that image gives cells smaller than "
+                                 f"100px ({w}x{h}). Use a bigger image or a smaller grid.")
+            out = []
+            for r in range(rows):
+                for c in range(cols):
+                    cell = img.crop((c * w, r * h, (c + 1) * w, (r + 1) * h))
+                    buf = io.BytesIO()
+                    cell.save(buf, "JPEG", quality=92)
+                    out.append(prepare_stored_portrait(buf.getvalue()))
+            return out
 
     async def cog_command_error(self, ctx, error):
         if isinstance(error, commands.MissingPermissions):
