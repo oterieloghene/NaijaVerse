@@ -86,6 +86,100 @@ NIN_CARD_TEXT = {
 # Registry: one entry per document type
 # ---------------------------------------------------------------------------
 
+PERMIT_CARD_DELAY_MINUTES = int(os.environ.get("PERMIT_CARD_DELAY_MINUTES", "20"))
+PERMIT_EXPIRY_DAYS = int(os.environ.get("PERMIT_EXPIRY_DAYS", "14"))
+
+# Residential location code -> (parent category key from locations.py, label printed in the card's
+# "RESIDENCE / APARTMENT" field). !permit only grants the "State Resident" role; it does not grant
+# any of the specific housing roles (Miniflat Resident etc.) — those are handled elsewhere.
+HOUSE_TYPES = {
+    "line-houses":         ("low_cost_housing",      "Line Houses"),
+    "bed-sitter":          ("low_cost_housing",      "Bed-Sitter"),
+    "mini-flat":           ("mid_class_residential",  "Mini Flat"),
+    "two-bedroom-flat":    ("mid_class_residential",  "Two Bedroom Flat"),
+    "three-bedroom-flat":  ("mid_class_residential",  "Three Bedroom Flat"),
+    "private-estate":      ("high_class_residential", "Private Estate"),
+    "luxury-duplex":       ("high_class_residential", "Luxury Duplex"),
+    "penthouse":           ("high_class_residential", "Penthouse"),
+}
+# Category key -> label printed after the address (matches locations.py's category display names).
+HOUSE_CATEGORY_LABELS = {
+    "low_cost_housing": "Low-Cost Housing",
+    "mid_class_residential": "Mid-Class Residential",
+    "high_class_residential": "High-Class Residential",
+}
+# Category key -> street/estate names used to build the address, e.g. "No 3, First Pipeline".
+# Add as many as you like; a random one is picked per registration.
+HOUSE_STREET_NAMES = {
+    "low_cost_housing": ["First Pipeline", "Second Pipeline", "Third Pipeline", "Unity Close", "Peace Avenue"],
+    "mid_class_residential": ["Freedom Way", "Garden Estate Road", "Palm Grove Street", "Harmony Crescent"],
+    "high_class_residential": ["Ocean View Drive", "Victoria Crescent", "Royal Palm Avenue", "Emerald Hills Road"],
+}
+STATE_RESIDENT_ROLE = "State Resident"     # the only role !permit grants
+
+# Text printed in each state's permit banner and used for the LGA field placeholder.
+STATE_BANNER = {
+    "Delta": "DELTA STATE",
+    "Lagos": "LAGOS STATE",
+    "Abuja": "FEDERAL CAPITAL TERRITORY",
+}
+# Which template a state's permit uses (keys into DOCUMENTS below).
+STATE_PERMIT_DOC = {"Delta": "permit_delta", "Lagos": "permit_lagos", "Abuja": "permit_abuja"}
+
+# All three templates share one layout, just a different colour skin, so one set of coordinates
+# and one set of text styles covers all of them. Measured by pixel-scanning the cropped card
+# (1685x1143) — see manual_crop below — not by eye, so these should already be accurate; nudge
+# and re-run `python permit_card.py` if anything still looks off.
+PERMIT_CARD_FIELDS = {
+    "portrait":             (102, 402, 450, 853),
+    "state_banner":         (544, 83, 1592, 170),
+    "full_name":            (544, 432, 1591, 480),
+    "permit_number":        (544, 528, 873, 575),
+    "nin":                  (925, 528, 1231, 572),
+    "nationality":          (1283, 528, 1587, 569),
+    "residence_type":       (542, 617, 1591, 666),
+    "address":              (542, 710, 1591, 762),
+    "lga":                  (537, 806, 874, 863),
+    "date_of_issuance":     (921, 809, 1233, 855),
+    "expiry_date":          (1283, 810, 1586, 854),
+    "issuing_authority":    (70, 955, 545, 1028),
+    "signature":            (735, 955, 1175, 1028),
+    "qr_code":              (1439, 944, 1591, 1094),
+}
+
+PERMIT_INK = "#17233B"
+PERMIT_CARD_TEXT = {
+    "state_banner":      dict(font="bold", max_size=40, min_size=18, color="#1B2A5E", align="center", pad_x=10, upper=True, vcenter="caps"),
+    "full_name":         dict(font="bold", max_size=32, min_size=14, color=PERMIT_INK, align="left", pad_x=16, upper=True),
+    "permit_number":     dict(font="bold", max_size=26, min_size=12, color=PERMIT_INK, align="left", pad_x=14, upper=True),
+    "nin":               dict(font="bold", max_size=26, min_size=12, color=PERMIT_INK, align="left", pad_x=14, upper=True),
+    "nationality":       dict(font="bold", max_size=26, min_size=12, color=PERMIT_INK, align="left", pad_x=14, upper=True),
+    "residence_type":    dict(font="bold", max_size=28, min_size=13, color=PERMIT_INK, align="left", pad_x=16, upper=True),
+    "address":           dict(font="bold", max_size=26, min_size=12, color=PERMIT_INK, align="left", pad_x=16, upper=True),
+    "lga":               dict(font="bold", max_size=26, min_size=12, color=PERMIT_INK, align="left", pad_x=14, upper=True),
+    "date_of_issuance":  dict(font="bold", max_size=24, min_size=12, color=PERMIT_INK, align="left", pad_x=14, upper=True),
+    "expiry_date":       dict(font="bold", max_size=24, min_size=12, color=PERMIT_INK, align="left", pad_x=14, upper=True),
+    "issuing_authority": dict(font="bold", max_size=22, min_size=11, color=PERMIT_INK, align="left", pad_x=4, upper=False),
+    "signature":         dict(font="signature", max_size=56, min_size=20, color="#1B2A5E", align="left", pad_x=10, upper=False, vcenter="ink"),
+}
+
+
+def _permit_entry(template_file):
+    return {
+        "template_files": [template_file],
+        # Detection doesn't work on this mockup's soft gradient background, so this is fixed:
+        # measured directly from the template with a cool-vs-warm colour split, not eyeballed.
+        "manual_crop": (359, 320, 2044, 1463),
+        "corner_radius": None,
+        "fields": PERMIT_CARD_FIELDS,
+        "text_styles": PERMIT_CARD_TEXT,
+        "image_fields": {"portrait": "portrait", "qr_code": "qr"},
+        "portrait_corner_radius": 10,
+        "portrait_centering": (0.5, 0.30),
+        "qr_dark": PERMIT_INK,
+    }
+
+
 DOCUMENTS = {
     "nin": {
         # first file that exists wins
@@ -104,4 +198,7 @@ DOCUMENTS = {
         "portrait_centering": (0.5, 0.30),   # crop focus: 0.30 = biased towards the top, keeps faces
         "qr_dark": "#0E1F16",
     },
+    "permit_delta": _permit_entry("naijaverse_permit_delta.jpg"),
+    "permit_abuja": _permit_entry("naijaverse_permit_abuja.jpg"),
+    "permit_lagos": _permit_entry("naijaverse_permit_lagos.jpg"),
 }

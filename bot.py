@@ -7,7 +7,9 @@ Minimal starting point for the RP bot. Wires together:
   - decay.py     (background stat decay loop)
   - keep_alive.py (Flask pinger so Render Web Service stays reachable)
   - cogs/onboarding.py (arrival via Discord Onboarding roles, !name, !immigrate)
-  - cogs/nin_delivery.py (NIN cards sent to parcel-pickup after 20 minutes, !portrait, !nincard)
+  - cogs/nin_delivery.py (NIN cards sent to parcel-pickup after 20 minutes, !portrait, !nincard,
+    !splitportraits for the stock-portrait archive)
+  - cogs/permit.py (Residence Permits: !permit @player <house type>, sent to parcel-pickup after 20 minutes)
   - cogs/banking.py (bank accounts, tiers, !open-account, !upgrade-tier, !bal, !transfer, !with, !dep)
   - cogs/phone.py (!phone, with the Bank app)
 
@@ -44,6 +46,10 @@ class RPBot(commands.Bot):
             await self.load_extension("cogs.nin_delivery")
         except Exception as exc:        # e.g. Pillow not installed yet: the rest of the bot still runs
             print(f"NIN card delivery NOT loaded: {exc!r}")
+        try:
+            await self.load_extension("cogs.permit")
+        except Exception as exc:
+            print(f"Residence permit delivery NOT loaded: {exc!r}")
         # banking must load before the phone: the phone's Bank app uses the bank tables
         for extension in ("cogs.banking", "cogs.phone", "cogs.cbn"):
             try:

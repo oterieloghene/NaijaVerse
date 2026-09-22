@@ -191,6 +191,50 @@ async def init_db():
             "CREATE INDEX IF NOT EXISTS nin_cards_due_idx ON nin_cards (due_at) WHERE sent_at IS NULL;"
         )
 
+        # Residence permits: one row per player, same shape as nin_cards. permit_number is
+        # permanent; re-registering keeps the number, refreshes everything else and the expiry.
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS residence_permits (
+                player_id       INTEGER PRIMARY KEY REFERENCES players(player_id) ON DELETE CASCADE,
+                permit_number   TEXT NOT NULL UNIQUE,
+                full_name       TEXT NOT NULL,
+                nin             TEXT NOT NULL DEFAULT '',
+                residence_type  TEXT NOT NULL,
+                address         TEXT NOT NULL,
+                lga             TEXT NOT NULL,
+                issue_state     TEXT NOT NULL,
+                date_of_issuance DATE NOT NULL,
+                expiry_date     DATE NOT NULL,
+                created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                due_at          TIMESTAMPTZ NOT NULL,
+                sent_at         TIMESTAMPTZ
+            );
+            """
+        )
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS residence_permits_due_idx ON residence_permits (due_at) WHERE sent_at IS NULL;"
+        )
+
+        # Stock portrait pool for players without a picture of their own. assigned_to is freed
+        # automatically (ON DELETE SET NULL) when a player leaves, so their face goes back into
+        # the pool instead of being lost.
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS portrait_archive (
+                id           SERIAL PRIMARY KEY,
+                gender       TEXT NOT NULL,
+                image        BYTEA NOT NULL,
+                assigned_to  INTEGER UNIQUE REFERENCES players(player_id) ON DELETE SET NULL,
+                added_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            """
+        )
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS portrait_archive_free_idx ON portrait_archive (gender) WHERE assigned_to IS NULL;"
+        )
+
         await conn.execute(
             """
             CREATE TABLE IF NOT EXISTS settings (
@@ -589,6 +633,7 @@ async def set_portrait(player_id: int, image: bytes):
             """,
             player_id, image,
         )
+    await release_archive_portrait(player_id)   # they have a real picture now; free their stock one
 
 
 async def get_portrait(player_id: int):
@@ -654,6 +699,122 @@ async def get_due_nin_cards(limit: int = 10):
 async def mark_nin_card_sent(player_id: int):
     async with get_pool().acquire() as conn:
         await conn.execute("UPDATE nin_cards SET sent_at = NOW() WHERE player_id = $1;", player_id)
+
+
+# ---------------------------------------------------------------------------
+# Residence permits
+# ---------------------------------------------------------------------------
+
+async def upsert_residence_permit(player_id, permit_number, full_name, nin, residence_type, address,
+                                  lga, issue_state, date_of_issuance, expiry_date, due_at):
+    """Create a player's permit, or update it (keeping the original permit_number) if they have one."""
+    async with get_pool().acquire() as conn:
+        return await conn.fetchrow(
+            """
+            INSERT INTO residence_permits (player_id, permit_number, full_name, nin, residence_type,
+                                           address, lga, issue_state, date_of_issuance, expiry_date, due_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            ON CONFLICT (player_id) DO UPDATE SET
+                full_name = EXCLUDED.full_name, nin = EXCLUDED.nin, residence_type = EXCLUDED.residence_type,
+                address = EXCLUDED.address, lga = EXCLUDED.lga, issue_state = EXCLUDED.issue_state,
+                date_of_issuance = EXCLUDED.date_of_issuance, expiry_date = EXCLUDED.expiry_date,
+                due_at = EXCLUDED.due_at, sent_at = NULL, updated_at = NOW()
+            RETURNING *;
+            """,
+            player_id, permit_number, full_name, nin, residence_type, address, lga, issue_state,
+            date_of_issuance, expiry_date, due_at,
+        )
+
+
+async def get_residence_permit_by_player(player_id: int):
+    async with get_pool().acquire() as conn:
+        return await conn.fetchrow("SELECT * FROM residence_permits WHERE player_id = $1;", player_id)
+
+
+async def get_due_residence_permits(limit: int = 10):
+    async with get_pool().acquire() as conn:
+        return await conn.fetch(
+            """
+            SELECT c.*, p.discord_id
+            FROM residence_permits c JOIN players p ON p.player_id = c.player_id
+            WHERE c.sent_at IS NULL AND c.due_at <= NOW()
+            ORDER BY c.due_at
+            LIMIT $1;
+            """,
+            limit,
+        )
+
+
+async def mark_residence_permit_sent(player_id: int):
+    async with get_pool().acquire() as conn:
+        await conn.execute("UPDATE residence_permits SET sent_at = NOW() WHERE player_id = $1;", player_id)
+
+
+# ---------------------------------------------------------------------------
+# Portrait archive (stock pictures for players without one of their own)
+# ---------------------------------------------------------------------------
+
+async def add_archive_portraits(gender: str, images: list[bytes]) -> int:
+    """Bulk-insert stock portraits for a gender. Returns how many were added."""
+    async with get_pool().acquire() as conn:
+        await conn.executemany(
+            "INSERT INTO portrait_archive (gender, image) VALUES ($1, $2);",
+            [(gender, img) for img in images],
+        )
+        return len(images)
+
+
+async def assign_archive_portrait(player_id: int, gender: str):
+    """
+    The archive image already assigned to this player, or a random unused one for their gender
+    (assigned on the spot, so it's permanent). None if the archive has nothing for that gender.
+    """
+    async with get_pool().acquire() as conn:
+        async with conn.transaction():
+            existing = await conn.fetchval(
+                "SELECT image FROM portrait_archive WHERE assigned_to = $1;", player_id
+            )
+            if existing is not None:
+                return existing
+            row = await conn.fetchrow(
+                """
+                SELECT id, image FROM portrait_archive
+                WHERE gender = $1 AND assigned_to IS NULL
+                ORDER BY random() LIMIT 1 FOR UPDATE SKIP LOCKED;
+                """,
+                gender,
+            )
+            if row is None:
+                return None
+            await conn.execute("UPDATE portrait_archive SET assigned_to = $1 WHERE id = $2;", player_id, row["id"])
+            return row["image"]
+
+
+async def release_archive_portrait(player_id: int):
+    """Free this player's archive picture (e.g. they uploaded a real one) so it re-enters the pool."""
+    async with get_pool().acquire() as conn:
+        await conn.execute("UPDATE portrait_archive SET assigned_to = NULL WHERE assigned_to = $1;", player_id)
+
+
+async def archive_counts():
+    """{gender: free_count} — how many unused stock portraits are left per gender."""
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT gender, COUNT(*) AS n FROM portrait_archive WHERE assigned_to IS NULL GROUP BY gender;"
+        )
+        return {r["gender"]: r["n"] for r in rows}
+
+
+async def get_effective_portrait(player_id: int, gender: str):
+    """
+    The image to put on this player's documents: their own upload if they have one, otherwise an
+    archive picture (assigned permanently the first time this is called), otherwise None (caller
+    falls back to the plain silhouette).
+    """
+    own = await get_portrait(player_id)
+    if own is not None:
+        return own
+    return await assign_archive_portrait(player_id, gender)
 
 
 # ---------------------------------------------------------------------------
