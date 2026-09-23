@@ -10,7 +10,8 @@ bank_messages.py; the tiers, limits, fee and tax live in bank_config.py.
   ATM                           !bal                          check your balance
                                 !transfer <@player | account number> <amount> [narration]
                                 !with <amount>                bank balance -> your cash
-  Admins                        !create-org-account <state> <name> <#receipt-channel>
+  Admins                        !open-org-account <state> <name> <#receipt-channel>
+                                !set-receipt-channel <org account number> <#channel>
   Accountant/Bank Mgr/Exec Dir  !close-account <@player | account number>   (must be zero balance)
   Bank Manager / Exec Director  !view-balances                the state's balances, DM'd to you
                                 !bank-debit @player <amount> [narration]
@@ -46,7 +47,8 @@ USAGE = {
     "transfer": "Usage: `!transfer <@player or 10-digit account number> <amount> [narration]`",
     "with": "Usage: `!with <amount>`",
     "dep": "Usage: `!dep @player <amount>`",
-    "create-org-account": "Usage: `!create-org-account <Delta|Lagos|Abuja> <organisation name> <#receipt-channel>`",
+    "open-org-account": "Usage: `!open-org-account <Delta|Lagos|Abuja> <organisation name> <#receipt-channel>`",
+    "set-receipt-channel": "Usage: `!set-receipt-channel <org account number> <#channel>`",
     "close-account": "Usage: `!close-account <@player | account number>`",
     "statement": "Usage: `!statement @player`",
     "send-statement": "Usage: `!send-statement @customer @recipient`",
@@ -193,13 +195,17 @@ class Banking(commands.Cog):
     @commands.command(name="dep")
     @commands.guild_only()
     async def dep(self, ctx, member: discord.Member, amount: str):
-        """!dep @player <amount>  (deposit channel): the player's cash goes into their account"""
+        """!dep @player <amount>  (deposit channel): YOUR cash goes into the player's account"""
         if not await self._only_in(ctx, cfg.DEPOSIT_CHANNEL, "deposit desk"):
             return
         try:
             value = cfg.parse_amount(amount)
         except ValueError as err:
             await ctx.send(str(err))
+            return
+        staff = await database.get_player_by_discord_id(ctx.author.id)
+        if staff is None:
+            await ctx.send("You haven't arrived yet.")
             return
         player = await database.get_player_by_discord_id(member.id)
         account = await bank.get_account_by_player(player["player_id"]) if player else None
@@ -208,7 +214,7 @@ class Banking(commands.Cog):
             return
 
         try:
-            result = await bank.deposit(account["account_id"], value)
+            result = await bank.deposit(account["account_id"], value, staff["player_id"])
         except BankError as err:
             await ctx.send(err.message)
             return
@@ -216,13 +222,13 @@ class Banking(commands.Cog):
                        allowed_mentions=NO_PINGS)
         await msgs.announce_transaction(self.bot, ctx.guild, result)
 
-    @commands.command(name="create-org-account")
+    @commands.command(name="open-org-account")
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
-    async def create_org_account(self, ctx, state: str, *, rest: str):
-        """!create-org-account <state> <organisation name> <#receipt-channel>: opens a business
+    async def open_org_account(self, ctx, state: str, *, rest: str):
+        """!open-org-account <state> <organisation name> <#receipt-channel>: opens a business
         account and sets which channel its payment receipts drop in, e.g.
-        !create-org-account Delta Delta Police Department #police-station"""
+        !open-org-account Delta Delta Police Department #police-station"""
         match = next((s for s in LOCATIONS if s.casefold() == state.casefold()), None)
         if match is None:
             await ctx.send("State must be one of: " + ", ".join(LOCATIONS) + ".")
@@ -231,7 +237,7 @@ class Banking(commands.Cog):
         name, _, channel_token = rest.strip().rpartition(" ")
         name, channel_token = name.strip(), channel_token.strip()
         if not name or not channel_token:
-            await ctx.send(USAGE["create-org-account"])
+            await ctx.send(USAGE["open-org-account"])
             return
         try:
             channel = await commands.TextChannelConverter().convert(ctx, channel_token)
@@ -247,6 +253,23 @@ class Banking(commands.Cog):
             return
         await ctx.send(f"✅ **{account['display_name']}** ({match}) account number: `{account['account_number']}`\n"
                        f"Receipts for payments in will post to {channel.mention}.")
+
+    @commands.command(name="set-receipt-channel")
+    @commands.guild_only()
+    @commands.has_permissions(administrator=True)
+    async def set_receipt_channel(self, ctx, account_number: str, channel: discord.TextChannel):
+        """!set-receipt-channel <org account number> <#channel>: changes where an org account's
+        payment receipts drop, without having to recreate the account."""
+        if not re.fullmatch(r"\d{%d}" % cfg.ACCOUNT_NUMBER_LENGTH, account_number.strip()):
+            await ctx.send(USAGE["set-receipt-channel"])
+            return
+        try:
+            account = await bank.set_receipt_channel(account_number.strip(), channel.id)
+        except BankError as err:
+            await ctx.send(err.message)
+            return
+        await ctx.send(f"✅ Receipts for **{account['display_name']}** (`{account['account_number']}`) "
+                       f"will now post to {channel.mention}.")
 
     @commands.command(name="close-account")
     @commands.guild_only()
@@ -344,6 +367,7 @@ class Banking(commands.Cog):
             return
         await ctx.send(f"✅ {cfg.money(value)} moved from **{member.display_name}** to the state bank account "
                        f"· Ref {result['ref']}", allowed_mentions=NO_PINGS)
+        await msgs.announce_transaction(self.bot, ctx.guild, result)
 
     @commands.command(name="bank-credit")
     @commands.guild_only()
@@ -369,6 +393,7 @@ class Banking(commands.Cog):
             return
         await ctx.send(f"✅ {cfg.money(value)} moved from the state bank account to **{member.display_name}** "
                        f"· Ref {result['ref']}", allowed_mentions=NO_PINGS)
+        await msgs.announce_transaction(self.bot, ctx.guild, result)
 
     # --- ATM commands -------------------------------------------------------------------
 
@@ -434,6 +459,10 @@ class Banking(commands.Cog):
         if mine is None:
             return
         _, account = mine
+        atm_state = state_of_channel(ctx.channel)
+        if atm_state is None:
+            await ctx.send("This ATM isn't in a recognised state's channels — tell an admin.")
+            return
         try:
             value = cfg.parse_amount(amount)
         except ValueError as err:
@@ -441,7 +470,7 @@ class Banking(commands.Cog):
             return
 
         try:
-            result = await bank.withdraw(account["account_id"], value)
+            result = await bank.withdraw(account["account_id"], value, atm_state)
         except BankError as err:
             await ctx.send(err.message)
             return

@@ -10,8 +10,12 @@ The Central Bank commands.
                                                                 moves money from the vault into
                                                                 the National Treasury or a state's
                                                                 bank account (bank_revenue)
+  CBN Governor only (vault)        !disburse <state>-treasury <amount>
+                                                                moves money from the National
+                                                                Treasury into a state's Treasury
   Bank Manager / Executive Director !load-cash <amount>        loads cash into the current
-                                                                state's ATM (no cash, no !with)
+                                                                state's ATM (no cash, no !with),
+                                                                drawn from that state's Bank PLC
 
 Only one !print job can run at a time, bot-wide. If the bot restarts mid-print, the job is
 simply lost (nothing is owed back) — run !print again for the remainder.
@@ -24,6 +28,7 @@ from discord.ext import commands
 
 import bank_config as cfg
 import bank_database as bank
+import bank_messages as bank_msgs
 import cbn_database as cbn
 import cbn_messages as msgs
 from bank_database import BankError
@@ -36,6 +41,7 @@ USAGE = {
     "print": "Usage: `!print <amount>` (multiples of ₦100,000,000), in the vault.",
     "cb-with": "Usage: `!cb-with <amount> <national treasury | Delta | Lagos | Abuja>`, in the vault.",
     "load-cash": "Usage: `!load-cash <amount>`, inside the state whose ATM you're loading.",
+    "disburse": "Usage: `!disburse <state>-treasury <amount>`, in the vault, e.g. `!disburse delta-treasury 50000000`.",
 }
 
 
@@ -145,11 +151,13 @@ class CBN(commands.Cog):
             await ctx.send(err.message)
             return
         await ctx.send(embed=msgs.cb_with_embed(ctx.author.mention, result), allowed_mentions=NO_PINGS)
+        await bank_msgs.announce_transaction(self.bot, ctx.guild, result)
 
     @commands.command(name="load-cash")
     @commands.guild_only()
     async def load_cash(self, ctx, amount: str):
-        """!load-cash <amount>  (Bank Manager / Executive Director): loads cash into this state's ATM"""
+        """!load-cash <amount>  (Bank Manager / Executive Director): loads cash into this state's
+        ATM, drawn from that state's own bank account (Bank PLC)."""
         if not cfg.member_has_role(ctx.author, cfg.BANK_MANAGER_ROLE_NAMES):
             await ctx.send("Only a Bank Manager or Executive Director can load ATM cash.")
             return
@@ -162,8 +170,49 @@ class CBN(commands.Cog):
         except ValueError as err:
             await ctx.send(str(err))
             return
-        new_balance = await bank.load_cash(state, value)
-        await ctx.send(embed=msgs.load_cash_embed(state, ctx.author.mention, new_balance), allowed_mentions=NO_PINGS)
+        try:
+            result = await bank.load_cash(state, value)
+        except BankError as err:
+            await ctx.send(err.message)
+            return
+        await ctx.send(embed=msgs.load_cash_embed(state, ctx.author.mention, result["new_cash_balance"]),
+                       allowed_mentions=NO_PINGS)
+        await bank_msgs.announce_transaction(self.bot, ctx.guild, result)
+
+    @commands.command(name="disburse")
+    @commands.guild_only()
+    async def disburse(self, ctx, destination: str, amount: str):
+        """!disburse <state>-treasury <amount>  (vault, CBN Governor only): moves money from the
+        National Treasury into a state's Treasury account. E.g. !disburse delta-treasury 50000000"""
+        if not cfg.member_has_role(ctx.author, cfg.CBN_GOVERNOR_ROLE_NAMES):
+            await ctx.send("Only the CBN Governor can disburse treasury funds.")
+            return
+        if not await self._only_in_vault(ctx):
+            return
+
+        dest = destination.strip().casefold()
+        if not dest.endswith("-treasury"):
+            await ctx.send(USAGE["disburse"])
+            return
+        state_token = dest[: -len("-treasury")]
+        match = next((s for s in LOCATIONS if s.casefold() == state_token), None)
+        if match is None:
+            await ctx.send("State must be one of: " + ", ".join(f"{s.casefold()}-treasury" for s in LOCATIONS) + ".")
+            return
+        try:
+            value = cfg.parse_amount(amount)
+        except ValueError as err:
+            await ctx.send(str(err))
+            return
+
+        try:
+            result = await bank.disburse_to_state_treasury(match, value)
+        except BankError as err:
+            await ctx.send(err.message)
+            return
+        await ctx.send(f"✅ {cfg.money(value)} disbursed from the National Treasury to **{match} Treasury** "
+                       f"· Ref {result['ref']}", allowed_mentions=NO_PINGS)
+        await bank_msgs.announce_transaction(self.bot, ctx.guild, result)
 
     # --- errors -------------------------------------------------------------------------
 
