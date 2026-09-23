@@ -63,6 +63,15 @@ def _limits_lines(tier_key):
 # Transaction log (posted in the transaction-log of the account's state)
 # ---------------------------------------------------------------------------
 
+_INTERNAL_KIND_TITLES = {
+    "bank-debit": "🏦 BANK DEBIT",
+    "bank-credit": "🏦 BANK CREDIT",
+    "cb-with": "🏛️ CBN WITHDRAWAL",
+    "disburse": "🏛️ TREASURY DISBURSEMENT",
+    "load-cash": "💵 ATM CASH LOADED",
+}
+
+
 def log_embed(result):
     kind = result["kind"]
     if kind == "transfer":
@@ -79,9 +88,19 @@ def log_embed(result):
     elif kind == "withdrawal":
         title = f"🏧 WITHDRAWAL · Ref {result['ref']}"
         lines = [SEP, f"Account: {result['sender']['display_name']}", f"Amount: {cfg.money(result['amount'])}"]
-    else:
+    elif kind == "deposit":
         title = f"💵 DEPOSIT · Ref {result['ref']}"
-        lines = [SEP, f"Account: {result['receiver']['display_name']}", f"Amount: {cfg.money(result['amount'])}"]
+        by = f" · Deposited by {result['deposited_by']}" if result.get("deposited_by") else ""
+        lines = [SEP, f"Account: {result['receiver']['display_name']}{by}", f"Amount: {cfg.money(result['amount'])}"]
+    elif kind in _INTERNAL_KIND_TITLES:
+        title = f"{_INTERNAL_KIND_TITLES[kind]} · Ref {result['ref']}"
+        lines = [SEP, f"From: {result['from_label']}", f"To: {result['to_label']}",
+                 f"Amount: {cfg.money(result['amount'])}"]
+        if result.get("narration"):
+            lines.append(f"Narration: {result['narration']}")
+    else:
+        title = f"💵 {kind.upper()} · Ref {result['ref']}"
+        lines = [SEP, f"Amount: {cfg.money(result['amount'])}"]
     lines += [SEP, _log_time(result["created_at"])]
     return _embed(title, lines, BLUE)
 
@@ -101,8 +120,12 @@ def debit_alert(result):
             f"Total: {cfg.money(result['total'])}",
             f"To: {result['receiver']['display_name']}",
         ]
-    else:
+    elif kind == "withdrawal":
         lines.append("Type: Cash withdrawal")
+    elif kind == "bank-debit":
+        lines.append(f"To: {result.get('to_label') or result['receiver']['display_name']}")
+    else:
+        lines.append(f"Type: {kind.replace('-', ' ').title()}")
     lines += [f"Balance: {cfg.money(result['sender']['balance'])}", SEP,
               f"Ref {result['ref']} · {_dm_time(result['created_at'])}"]
     return _embed("🔴 DEBIT ALERT", lines, RED)
@@ -110,11 +133,17 @@ def debit_alert(result):
 
 def credit_alert(result):
     """For the person whose account was credited (receiver / depositor)."""
+    kind = result["kind"]
     lines = [SEP, f"Amount: {cfg.money(result['amount'])}"]
-    if result["kind"] == "transfer":
+    if kind == "transfer":
         lines.append(f"From: {result['sender']['display_name']}")
+    elif kind == "bank-credit":
+        lines.append(f"From: {result.get('from_label') or result['sender']['display_name']}")
+    elif kind == "deposit":
+        by = result.get("deposited_by")
+        lines.append(f"Type: Cash deposit" + (f" (by {by})" if by else ""))
     else:
-        lines.append("Type: Cash deposit")
+        lines.append(f"Type: {kind.replace('-', ' ').title()}")
     lines += [f"Balance: {cfg.money(result['receiver']['balance'])}", SEP,
               f"Ref {result['ref']} · {_dm_time(result['created_at'])}"]
     return _embed("🟢 CREDIT ALERT", lines, GREEN)

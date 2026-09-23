@@ -122,6 +122,13 @@ async def init_tables():
             );
             """
         )
+        # Old rows were named "<state> Bank Revenue" before the rename to "<state> Bank PLC".
+        await conn.execute(
+            """
+            UPDATE bank_accounts SET name = REPLACE(name, ' Bank Revenue', ' Bank PLC')
+            WHERE account_type = 'bank_revenue' AND name LIKE '% Bank Revenue';
+            """
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -208,6 +215,21 @@ async def create_org_account(state, name, receipt_channel_id=None):
     raise BankError("Couldn't find a free account number. Please try again.")
 
 
+async def set_receipt_channel(account_number, receipt_channel_id):
+    """Changes which channel an org account's payment receipts post to. Raises BankError if the
+    account doesn't exist or isn't an org account."""
+    async with database.get_pool().acquire() as conn:
+        acc = await conn.fetchrow("SELECT account_id, account_type FROM bank_accounts WHERE account_number = $1;",
+                                  str(account_number))
+        if acc is None:
+            raise BankError("No account exists with that number.")
+        if acc["account_type"] != _ORG:
+            raise BankError("Only organisation accounts have a receipt channel.")
+        await conn.execute("UPDATE bank_accounts SET receipt_channel_id = $1 WHERE account_id = $2;",
+                           receipt_channel_id, acc["account_id"])
+        return await conn.fetchrow(ACCOUNT_SELECT + " WHERE a.account_id = $1;", acc["account_id"])
+
+
 async def set_tier(account_id, tier):
     """Returns (old_tier, updated_account_row). `tier` must be a key of bank_config.TIERS."""
     if tier not in cfg.TIERS:
@@ -231,7 +253,7 @@ async def _system_account(conn, state, kind):
     row = await conn.fetchrow(query, state, kind)
     if row:
         return row
-    title = "Treasury" if kind == _TREASURY else "Bank Revenue"
+    title = "Treasury" if kind == _TREASURY else "Bank PLC"
     for _ in range(20):
         row = await conn.fetchrow(
             """
@@ -311,12 +333,16 @@ async def _insert_tx(conn, kind, from_acc, to_acc, from_name, to_name, amount, f
 
 
 def _party(row, balance_after):
+    """row is either an ACCOUNT_SELECT row (has display_name/discord_id from the players join)
+    or a raw bank_accounts row from _system_account/_national_treasury (neither column exists
+    there) — handle both."""
+    keys = row.keys()
     return {
         "account_id": row["account_id"],
         "account_number": row["account_number"],
         "account_type": row["account_type"],
-        "display_name": row["display_name"],
-        "discord_id": row["discord_id"],
+        "display_name": row["display_name"] if "display_name" in keys else row["name"],
+        "discord_id": row["discord_id"] if "discord_id" in keys else None,
         "tier": row["tier"],
         "balance": balance_after,
         "receipt_channel_id": row["receipt_channel_id"],
@@ -426,8 +452,13 @@ async def transfer(sender_account_id, receiver_number, amount, narration="", *, 
             return result
 
 
-async def withdraw(account_id, amount):
-    """Bank balance -> the player's cash (used at the ATM). Same result shape as transfer()."""
+async def withdraw(account_id, amount, atm_state):
+    """Bank balance -> the player's cash (used at the ATM). Same result shape as transfer().
+
+    atm_state: the state of the ATM channel the command was used in — cash is drawn from THAT
+    state's ATM pool, not the account holder's home state. A Delta account withdrawing at the
+    Lagos ATM draws down Lagos's cash, not Delta's; each state's cash is separate.
+    """
     amount = cfg.to_money(amount)
     if amount <= 0:
         raise BankError("The amount must be more than zero.")
@@ -448,14 +479,14 @@ async def withdraw(account_id, amount):
             if acc["balance"] < amount:
                 raise BankError(f"Insufficient funds. Your balance is {cfg.money(acc['balance'])}.")
 
-            # No cash loaded in this state's ATM -> the withdrawal is refused (see !load-cash).
-            cash_row = await conn.fetchrow("SELECT balance FROM atm_cash WHERE state = $1 FOR UPDATE;", acc["state"])
+            # No cash loaded in THIS ATM's state -> the withdrawal is refused (see !load-cash).
+            cash_row = await conn.fetchrow("SELECT balance FROM atm_cash WHERE state = $1 FOR UPDATE;", atm_state)
             atm_balance = cash_row["balance"] if cash_row else cfg.to_money(0)
             if atm_balance < amount:
                 raise BankError("🏧 This ATM is out of cash.")
             await conn.execute(
                 "INSERT INTO atm_cash (state, balance) VALUES ($1, $2) ON CONFLICT (state) DO UPDATE SET balance = $2;",
-                acc["state"], atm_balance - amount,
+                atm_state, atm_balance - amount,
             )
 
             await conn.execute("UPDATE bank_accounts SET balance = balance - $1 WHERE account_id = $2;", amount, account_id)
@@ -475,8 +506,10 @@ async def withdraw(account_id, amount):
             }
 
 
-async def deposit(account_id, amount):
-    """The player's cash -> their bank balance (Bank Staff use this with !dep)."""
+async def deposit(account_id, amount, staff_player_id):
+    """A Bank Staff member's own cash -> a player's bank balance (!dep). Cash comes out of the
+    STAFF member's pocket (staff_player_id), not the customer's — the customer hands staff
+    physical cash separately; that hand-off isn't modelled here yet."""
     amount = cfg.to_money(amount)
     if amount <= 0:
         raise BankError("The amount must be more than zero.")
@@ -488,10 +521,14 @@ async def deposit(account_id, amount):
             acc = locked.get(account_id)
             _need_personal(acc)
 
-            cash = await conn.fetchval("SELECT cash_balance FROM players WHERE player_id = $1 FOR UPDATE;",
-                                       acc["player_id"])
-            if cash is None or cash < amount:
-                raise BankError(f"{acc['display_name']} only has {cfg.money(cash or 0)} in cash.")
+            staff_row = await conn.fetchrow(
+                "SELECT cash_balance, character_name FROM players WHERE player_id = $1 FOR UPDATE;",
+                staff_player_id,
+            )
+            if staff_row is None:
+                raise BankError("Couldn't find your own player record.")
+            if staff_row["cash_balance"] < amount:
+                raise BankError(f"You only have {cfg.money(staff_row['cash_balance'])} in cash.")
 
             usage = await _usage_row(conn, account_id, day)
             limit = cfg.TIERS[acc["tier"]]["daily_deposit"]
@@ -504,18 +541,20 @@ async def deposit(account_id, amount):
                 raise BankError(f"That would go over the account's maximum balance of {cfg.money(cap)}.")
 
             await conn.execute("UPDATE players SET cash_balance = cash_balance - $1 WHERE player_id = $2;",
-                               amount, acc["player_id"])
+                               amount, staff_player_id)
             await conn.execute("UPDATE bank_accounts SET balance = balance + $1 WHERE account_id = $2;", amount, account_id)
             await conn.execute(
                 "UPDATE bank_daily_usage SET deposited = deposited + $1 WHERE account_id = $2 AND day = $3;",
                 amount, account_id, day,
             )
             zero = cfg.to_money(0)
-            tx = await _insert_tx(conn, "deposit", None, account_id, None, acc["display_name"],
+            staff_name = staff_row["character_name"] or "Bank Staff"
+            tx = await _insert_tx(conn, "deposit", None, account_id, staff_name, acc["display_name"],
                                   amount, zero, zero, "", acc["state"])
             return {
                 "kind": "deposit", "ref": tx["ref"], "created_at": tx["created_at"], "state": acc["state"],
                 "amount": amount, "fee": zero, "tax": zero, "total": amount, "narration": "",
+                "deposited_by": staff_name,
                 "sender": None, "receiver": _party(acc, acc["balance"] + amount),
             }
 
@@ -617,10 +656,14 @@ async def _state_bank_move(player_account_id, amount, narration, direction):
             zero = cfg.to_money(0)
             tx = await _insert_tx(conn, kind, from_id, to_id, from_name, to_name,
                                   amount, zero, zero, narration, player_acc["state"])
+            player_party = _party(player_acc, new_player)
+            state_party = _party(state_acc, new_state)
+            sender, receiver = (player_party, state_party) if direction == "debit" else (state_party, player_party)
             return {
                 "kind": kind, "ref": tx["ref"], "created_at": tx["created_at"], "state": player_acc["state"],
                 "amount": amount, "fee": zero, "tax": zero, "total": amount, "narration": narration,
-                "player": _party(player_acc, new_player), "state_bank_balance": new_state,
+                "sender": sender, "receiver": receiver,
+                "from_label": from_name, "to_label": to_name,
             }
 
 
@@ -635,7 +678,8 @@ async def bank_credit(player_account_id, amount, narration=""):
 
 
 # ---------------------------------------------------------------------------
-# !load-cash: a state's ATM cash pool. !with (above) refuses withdrawals once it runs out.
+# !load-cash: a state's ATM cash pool, funded from that state's own bank account (Bank PLC).
+# !with (above) refuses withdrawals once a state's pool runs out.
 # ---------------------------------------------------------------------------
 
 async def get_atm_cash(state):
@@ -645,15 +689,72 @@ async def get_atm_cash(state):
 
 
 async def load_cash(state, amount):
+    """Moves `amount` OUT of the state's bank account (Bank PLC) and INTO its ATM cash pool.
+    Raises BankError if the state bank account doesn't have enough."""
     amount = cfg.to_money(amount)
     if amount <= 0:
         raise BankError("The amount must be more than zero.")
     async with database.get_pool().acquire() as conn:
         async with conn.transaction():
+            state_acc = await _system_account(conn, state, _REVENUE)
+            locked = await _lock(conn, [state_acc["account_id"]])
+            state_acc = locked[state_acc["account_id"]]
+            if state_acc["balance"] < amount:
+                raise BankError(f"{state_acc['name']} only has {cfg.money(state_acc['balance'])}.")
+
+            new_state_balance = state_acc["balance"] - amount
+            await conn.execute("UPDATE bank_accounts SET balance = $1 WHERE account_id = $2;",
+                               new_state_balance, state_acc["account_id"])
+
             row = await conn.fetchrow("SELECT balance FROM atm_cash WHERE state = $1 FOR UPDATE;", state)
-            new_balance = (row["balance"] if row else cfg.to_money(0)) + amount
+            new_cash_balance = (row["balance"] if row else cfg.to_money(0)) + amount
             await conn.execute(
                 "INSERT INTO atm_cash (state, balance) VALUES ($1, $2) ON CONFLICT (state) DO UPDATE SET balance = $2;",
-                state, new_balance,
+                state, new_cash_balance,
             )
-            return new_balance
+
+            zero = cfg.to_money(0)
+            tx = await _insert_tx(conn, "load-cash", state_acc["account_id"], None, state_acc["name"], f"{state} ATM",
+                                  amount, zero, zero, "", state)
+            return {
+                "kind": "load-cash", "ref": tx["ref"], "created_at": tx["created_at"], "state": state,
+                "amount": amount, "fee": zero, "tax": zero, "total": amount, "narration": "",
+                "sender": _party(state_acc, new_state_balance), "receiver": None,
+                "new_cash_balance": new_cash_balance,
+                "from_label": state_acc["name"], "to_label": f"{state} ATM Cash",
+            }
+
+
+# ---------------------------------------------------------------------------
+# !disburse: National Treasury -> a state's Treasury account (CBN Governor only).
+# ---------------------------------------------------------------------------
+
+async def disburse_to_state_treasury(state, amount):
+    amount = cfg.to_money(amount)
+    if amount <= 0:
+        raise BankError("The amount must be more than zero.")
+    async with database.get_pool().acquire() as conn:
+        async with conn.transaction():
+            national = await _national_treasury(conn)
+            state_treasury = await _system_account(conn, state, _TREASURY)
+            locked = await _lock(conn, [national["account_id"], state_treasury["account_id"]])
+            national, state_treasury = locked[national["account_id"]], locked[state_treasury["account_id"]]
+
+            if national["balance"] < amount:
+                raise BankError(f"The National Treasury only has {cfg.money(national['balance'])}.")
+            new_national = national["balance"] - amount
+            new_state = state_treasury["balance"] + amount
+            await conn.execute("UPDATE bank_accounts SET balance = $1 WHERE account_id = $2;",
+                               new_national, national["account_id"])
+            await conn.execute("UPDATE bank_accounts SET balance = $1 WHERE account_id = $2;",
+                               new_state, state_treasury["account_id"])
+
+            zero = cfg.to_money(0)
+            tx = await _insert_tx(conn, "disburse", national["account_id"], state_treasury["account_id"],
+                                  national["name"], state_treasury["name"], amount, zero, zero, "", state)
+            return {
+                "kind": "disburse", "ref": tx["ref"], "created_at": tx["created_at"], "state": state,
+                "amount": amount, "fee": zero, "tax": zero, "total": amount, "narration": "",
+                "sender": _party(national, new_national), "receiver": _party(state_treasury, new_state),
+                "from_label": national["name"], "to_label": state_treasury["name"],
+            }

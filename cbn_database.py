@@ -52,7 +52,13 @@ async def cb_withdraw(destination, amount):
     Move `amount` out of the vault into an account.
     destination: cfg.NATIONAL_TREASURY_STATE for the National Treasury, or a state name for
     that state's bank account (bank_revenue).
-    Returns {"destination_name", "amount", "new_vault_balance", "new_destination_balance"}.
+
+    Returns a dict with both:
+      - the vault-specific fields cogs/cbn.py uses for the vault-channel embed
+        ("destination_name", "new_vault_balance", "new_destination_balance")
+      - the standard announce_transaction() shape (kind, ref, created_at, state, amount, fee,
+        tax, narration, sender, receiver) so it also posts to the destination's transaction log
+        and (if the destination were a personal account, which it never is here) DMs.
     """
     amount = cfg.to_money(amount)
     if amount <= 0:
@@ -78,9 +84,17 @@ async def cb_withdraw(destination, amount):
                 "INSERT INTO cbn_vault (id, balance) VALUES (1, $1) ON CONFLICT (id) DO UPDATE SET balance = $1;",
                 new_vault_balance,
             )
+            zero = cfg.to_money(0)
+            tx = await bank._insert_tx(conn, "cb-with", None, account["account_id"], "CBN Vault",
+                                       account["name"], amount, zero, zero, "", destination)
             return {
                 "destination_name": account["name"],
                 "amount": amount,
                 "new_vault_balance": new_vault_balance,
                 "new_destination_balance": new_destination_balance,
+                # announce_transaction() shape
+                "kind": "cb-with", "ref": tx["ref"], "created_at": tx["created_at"], "state": destination,
+                "fee": zero, "tax": zero, "total": amount, "narration": "",
+                "sender": None, "receiver": bank._party(account, new_destination_balance),
+                "from_label": "CBN Vault", "to_label": account["name"],
             }

@@ -78,6 +78,7 @@ UPGRADE_ROLE_NAMES = ("Accountant", "Bank Manager", "Executive Director")
 BANK_MANAGER_ROLE_NAMES = ("Bank Manager", "Executive Director")   # !view-balances, !bank-debit, !bank-credit
 AUDIT_ROLE_NAMES = ("Auditor", "Bank Manager")                     # !statement, !send-statement
 CBN_ROLE_NAMES = ("CBN Governor", "CBN Deputy")                    # !print, !cb-with
+CBN_GOVERNOR_ROLE_NAMES = ("CBN Governor",)                        # !disburse (Governor only, not Deputy)
 
 # A single row, not tied to any state: account_type = 'national_treasury'.
 NATIONAL_TREASURY_STATE = "National"
