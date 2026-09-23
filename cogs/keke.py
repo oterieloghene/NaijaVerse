@@ -338,6 +338,9 @@ class Keke(commands.Cog):
         self._guild_map = {}  # guild_id -> {stop_code: channel}
         self._ensure_engine_task()
 
+    async def cog_load(self):
+        await kdb.init_tables()
+
     def cog_unload(self):
         for unit in list(self.kekes.values()):
             unit._loop_stop.set()
@@ -526,5 +529,5 @@ class Keke(commands.Cog):
         await announce_transaction(self.bot, ctx.guild, result)
 
 
-def setup(bot):
-    bot.add_cog(Keke(bot))
+async def setup(bot):
+    await bot.add_cog(Keke(bot))
