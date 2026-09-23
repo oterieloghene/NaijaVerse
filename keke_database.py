@@ -101,7 +101,7 @@ async def buy_keke(state, zone, buyer_id):
                 kc.KEKE_COST, treasury["account_id"],
             )
             tx = await bank._insert_tx(conn, "keke_purchase", treasury["account_id"], None,
-                                       treasury["display_name"], None,
+                                       treasury["name"], None,
                                        kc.KEKE_COST, cfg.to_money(0), cfg.to_money(0),
                                        f"Keke purchase (zone {zone})", state)
 
@@ -119,6 +119,10 @@ async def buy_keke(state, zone, buyer_id):
                 "cost": kc.KEKE_COST,
                 "new_treasury_balance": new_treasury_balance,
                 "ref": tx["ref"],
+                "kind": "keke_purchase", "amount": kc.KEKE_COST,
+                "created_at": tx["created_at"], "state": state,
+                "sender": bank._party(treasury, new_treasury_balance), "receiver": None,
+                "from_label": treasury["name"], "to_label": f"{state} Keke (zone {zone})",
             }
 
 
@@ -177,7 +181,7 @@ async def credit_fare(state, player_id, player_name, fare):
     async with database.get_pool().acquire() as conn:
         async with conn.transaction():
             player = await conn.fetchrow(
-                "SELECT player_id, character_name, cash_balance FROM players WHERE player_id = $1 FOR UPDATE;",
+                "SELECT player_id, discord_id, character_name, cash_balance FROM players WHERE player_id = $1 FOR UPDATE;",
                 player_id,
             )
             if player is None:
@@ -201,12 +205,34 @@ async def credit_fare(state, player_id, player_name, fare):
             )
             tx = await bank._insert_tx(conn, "keke_fare", None, treasury["account_id"],
                                        player["character_name"] or player_name,
-                                       treasury["display_name"],
+                                       treasury["name"],
                                        fare, cfg.to_money(0), cfg.to_money(0),
                                        "Keke fare", state)
+            player_party = {
+                "account_id": None,
+                "account_number": None,
+                "account_type": "player",
+                "display_name": player["character_name"] or player_name,
+                "discord_id": player["discord_id"],
+                "tier": "bronze",
+                "balance": new_cash,
+                "receipt_channel_id": None,
+            }
             return {
                 "fare": fare,
                 "new_cash": new_cash,
                 "new_treasury_balance": new_treasury_balance,
                 "ref": tx["ref"],
+                "kind": "keke_fare",
+                "created_at": tx["created_at"],
+                "state": state,
+                "amount": fare,
+                "fee": cfg.to_money(0),
+                "tax": cfg.to_money(0),
+                "total": fare,
+                "narration": "Keke fare",
+                "sender": player_party,
+                "receiver": bank._party(treasury, new_treasury_balance),
+                "from_label": player["character_name"] or player_name,
+                "to_label": treasury["name"],
             }
