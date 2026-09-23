@@ -463,7 +463,7 @@ _A_LAGOS = partial(_A, "Lagos")
 LOCATIONS["Delta"]["university"] = {
     "display_name": "Delta State University",
     "locations": {
-        "administrative-block": _loc("Administrative Block", _A_DELTA(RES), sub_locations={
+        "administrative-office": _loc("Administrative Office", _A_DELTA(RES), sub_locations={
             "school-of-law": _sub("School of Law", _A_DELTA("Law Student", "Lecturer")),
             "school-of-nursing": _sub("School of Nursing", _A_DELTA("Nursing Student", "Lecturer")),
             "school-of-admin": _sub("School of Admin", _A_DELTA("Admin Student", "Lecturer")),
