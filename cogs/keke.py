@@ -108,7 +108,8 @@ MSG_TRAFFIC = "🚦 traffic dey today o 😩"
 MSG_DROPPED = "@player you don reach o. Your money na ₦{fare}, Thank you o 😊💸"
 MSG_EXCEPTION_DROPOFF = (
     "@player, tax force nor gree us reach {destination}. "
-    "Come down here {dropoff} trek. Nor vex 😭🚶🏾"
+    "Come down here {dropoff} trek. Nor vex 😭🚶🏾\n"
+    "Your money na {fare}."
 )
 MSG_FUEL_EMPTY = "Make ona nor vex, fuel don finish ⛽ {passengers}"
 
@@ -716,6 +717,7 @@ class KekeUnit:
                         text = MSG_EXCEPTION_DROPOFF.format(
                             destination=p["destination"],
                             dropoff=channel.name,
+                            fare=fare_text,
                         ).replace("@player", f"<@{p['member_id']}>")
                     else:
                         text = MSG_DROPPED.replace(
