@@ -126,6 +126,16 @@ async def buy_keke(state, zone, buyer_id):
             }
 
 
+async def reset_fuel(state):
+    """Refill every keke of `state` to a full tank. Used on each bot start while
+    refuelling is deferred (see cogs/keke.py RESET_FUEL_ON_DEPLOY)."""
+    async with database.get_pool().acquire() as conn:
+        await conn.execute(
+            "UPDATE kekes SET fuel_liters = $1 WHERE state = $2;",
+            kc.TANK_CAPACITY_L, state,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Fuel: 0.25 L per km out of the 30 L tank. Refueling is deferred — nothing
 # buys fuel, the tank only ever drains.
