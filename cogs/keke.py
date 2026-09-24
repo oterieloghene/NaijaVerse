@@ -675,14 +675,21 @@ class Keke(commands.Cog):
                 await kdb.reset_fuel(STATE)
             except Exception:
                 log.exception("keke engine: could not reset fuel")
-        # Spawn loops for every purchased keke (survives bot restarts).
+        # Spawn loops for every purchased keke in an active zone (survives bot
+        # restarts). A zone stopped with !keke-stop stays stopped here too —
+        # the flag lives in the DB, not just in this process's memory.
         try:
             rows = await kdb.get_kekes(STATE)
         except Exception:
             log.exception("keke engine: could not load kekes")
             return
+        try:
+            active_zones = await kdb.get_active_zones(STATE)
+        except Exception:
+            log.exception("keke engine: could not load zone start/stop state — defaulting to all zones active")
+            active_zones = set(kc.ZONES)
         for row in rows:
-            if row["keke_id"] in self.kekes:
+            if row["keke_id"] in self.kekes or row["zone"] not in active_zones:
                 continue
             unit = KekeUnit(row, self._stop_channels, self.kekes)
             unit.spawn(self.bot)
@@ -969,6 +976,68 @@ class Keke(commands.Cog):
             unit.spawn(self.bot)
             self.kekes[row["keke_id"]] = unit
         await announce_transaction(self.bot, ctx.guild, result)
+
+    def _parse_zones(self, arg):
+        """'A' / 'A,B' / 'A,B,C' (any spacing/case) -> sorted unique valid
+        zone letters, or None if nothing in it was a real zone."""
+        zones = {z.strip().upper() for z in arg.split(",") if z.strip()}
+        zones &= set(kc.ZONES)
+        return sorted(zones) or None
+
+    @commands.command(
+        name="keke-start",
+        help="Delta Commissioner of Commerce restarts keke service in one or more zones, e.g. !keke-start A,B",
+    )
+    async def keke_start(self, ctx, zones: str):
+        if not self._has_role(ctx.author, COMMISSIONER_ROLES):
+            await ctx.reply("Not accessible❗You need gate pass 🪪")
+            return
+        parsed = self._parse_zones(zones)
+        if parsed is None:
+            await ctx.reply("invalid destination ❌ — use zone letters A, B and/or C, e.g. `!keke-start A,B`")
+            return
+        for zone in parsed:
+            await kdb.set_zone_active(STATE, zone, True)
+        self._refresh_channels()
+        try:
+            rows = await kdb.get_kekes(STATE)
+        except Exception:
+            log.exception("keke-start: could not load kekes")
+            rows = []
+        started = []
+        for row in rows:
+            if row["zone"] not in parsed or row["keke_id"] in self.kekes:
+                continue
+            unit = KekeUnit(row, self._stop_channels, self.kekes)
+            unit.spawn(self.bot)
+            self.kekes[row["keke_id"]] = unit
+            started.append(row["keke_id"])
+        note = f" (#{', #'.join(str(i) for i in started)} back on the road)" if started \
+            else " (no kekes owned there yet)"
+        await ctx.reply(f"🟢 Keke service started in zone(s) {', '.join(parsed)}.{note}")
+
+    @commands.command(
+        name="keke-stop",
+        help="Delta Commissioner of Commerce halts keke service in one or more zones, e.g. !keke-stop A,B",
+    )
+    async def keke_stop(self, ctx, zones: str):
+        if not self._has_role(ctx.author, COMMISSIONER_ROLES):
+            await ctx.reply("Not accessible❗You need gate pass 🪪")
+            return
+        parsed = self._parse_zones(zones)
+        if parsed is None:
+            await ctx.reply("invalid destination ❌ — use zone letters A, B and/or C, e.g. `!keke-stop A,B`")
+            return
+        for zone in parsed:
+            await kdb.set_zone_active(STATE, zone, False)
+        stopped = []
+        for unit in list(self.kekes.values()):
+            if unit.zone in parsed and unit.running:
+                await unit.shutdown()
+                stopped.append(unit.keke_id)
+        note = f" (#{', #'.join(str(i) for i in stopped)} pulling in)" if stopped \
+            else " (none currently running there)"
+        await ctx.reply(f"🔴 Keke service stopped in zone(s) {', '.join(parsed)}.{note}")
 
 
 async def setup(bot):
