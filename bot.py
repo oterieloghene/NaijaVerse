@@ -22,7 +22,10 @@ In the Discord Developer Portal (Bot tab) turn ON "Server Members Intent" —
 the bot needs it to see people joining/leaving and to assign roles.
 """
 
+import logging
 import os
+import time
+
 import discord
 from discord.ext import commands
 
@@ -73,4 +76,20 @@ async def on_ready():
 
 if __name__ == "__main__":
     keep_alive(bot)
-    bot.run(TOKEN)
+    try:
+        bot.run(TOKEN)
+    except Exception:
+        # If the bot dies after startup (e.g. Discord's global rate limit
+        # blocks it hard), DON'T let the process exit. Render treats an exit
+        # as a failed deploy and immediately restarts the container, which
+        # replays the exact startup burst that caused the crash in the first
+        # place — a redeploy loop that makes the rate limit worse each time.
+        # keep_alive's Flask server runs in its own daemon thread and is
+        # unaffected by this crash, so it keeps answering Render's health
+        # check; staying alive (instead of exiting) means Render sees a
+        # healthy service and leaves it alone instead of kicking off another
+        # deploy. This does NOT reconnect the bot — that needs a manual
+        # restart on Render once the underlying issue is fixed.
+        logging.exception("Bot crashed after startup — staying up with no reconnect so Render doesn't redeploy-loop.")
+        while True:
+            time.sleep(3600)

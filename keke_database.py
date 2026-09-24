@@ -64,6 +64,16 @@ async def init_tables():
             );
             """
         )
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS keke_zone_state (
+                state         TEXT NOT NULL,
+                zone          TEXT NOT NULL CHECK (zone IN ('A', 'B', 'C')),
+                active        BOOLEAN NOT NULL DEFAULT TRUE,
+                PRIMARY KEY (state, zone)
+            );
+            """
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -84,6 +94,36 @@ async def get_kekes(state):
 async def get_keke(keke_id):
     async with database.get_pool().acquire() as conn:
         return await conn.fetchrow("SELECT * FROM kekes WHERE keke_id = $1;", keke_id)
+
+
+# ---------------------------------------------------------------------------
+# !keke-start / !keke-stop: per-zone on/off switch for the Delta Commissioner
+# of Commerce. Persisted (not just held in the cog's memory) so a stopped
+# zone STAYS stopped across a redeploy instead of the engine silently
+# respawning it the next time it loads every row from `kekes` on boot.
+# ---------------------------------------------------------------------------
+
+async def get_active_zones(state):
+    """Zones ('A'/'B'/'C') currently allowed to run kekes for `state`. A zone
+    with no row yet has never been stopped, so it defaults to active."""
+    async with database.get_pool().acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT zone, active FROM keke_zone_state WHERE state = $1;", state
+        )
+    stopped = {r["zone"] for r in rows if not r["active"]}
+    return {z for z in kc.ZONES if z not in stopped}
+
+
+async def set_zone_active(state, zone, active):
+    async with database.get_pool().acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO keke_zone_state (state, zone, active)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (state, zone) DO UPDATE SET active = EXCLUDED.active;
+            """,
+            state, zone, active,
+        )
 
 
 # ---------------------------------------------------------------------------
