@@ -69,10 +69,15 @@ async def init_tables():
             CREATE TABLE IF NOT EXISTS keke_parked (
                 keke_id       INTEGER PRIMARY KEY REFERENCES kekes(keke_id) ON DELETE CASCADE,
                 channel_id    BIGINT NOT NULL,
-                message_id    BIGINT NOT NULL
+                message_id    BIGINT NOT NULL,
+                stop_code     TEXT,
+                direction     SMALLINT
             );
             """
         )
+        # Databases created by the first version of this table lack the column.
+        await conn.execute("ALTER TABLE keke_parked ADD COLUMN IF NOT EXISTS stop_code TEXT;")
+        await conn.execute("ALTER TABLE keke_parked ADD COLUMN IF NOT EXISTS direction SMALLINT;")
         await conn.execute(
             """
             CREATE TABLE IF NOT EXISTS keke_zone_state (
@@ -215,22 +220,30 @@ async def get_locks():
 # The "KEKE PARKED" block: one per keke, kept until the keke is back in service.
 # ---------------------------------------------------------------------------
 
-async def set_parked(keke_id, channel_id, message_id):
+async def set_parked(keke_id, channel_id, message_id, stop_code, direction=1):
+    """`stop_code` is the stop the keke is parked at and `direction` (+1 towards
+    the route end, -1 back) the way it was heading: it re-enters the road there,
+    that way, when it is put back into service."""
     async with database.get_pool().acquire() as conn:
         await conn.execute(
             """
-            INSERT INTO keke_parked (keke_id, channel_id, message_id)
-            VALUES ($1, $2, $3)
+            INSERT INTO keke_parked (keke_id, channel_id, message_id, stop_code, direction)
+            VALUES ($1, $2, $3, $4, $5)
             ON CONFLICT (keke_id) DO UPDATE
-                SET channel_id = EXCLUDED.channel_id, message_id = EXCLUDED.message_id;
+                SET channel_id = EXCLUDED.channel_id,
+                    message_id = EXCLUDED.message_id,
+                    stop_code  = EXCLUDED.stop_code,
+                    direction  = EXCLUDED.direction;
             """,
-            keke_id, channel_id, message_id,
+            keke_id, channel_id, message_id, stop_code, direction,
         )
 
 
 async def get_parked():
     async with database.get_pool().acquire() as conn:
-        return await conn.fetch("SELECT keke_id, channel_id, message_id FROM keke_parked;")
+        return await conn.fetch(
+            "SELECT keke_id, channel_id, message_id, stop_code, direction FROM keke_parked;"
+        )
 
 
 async def pop_parked(keke_id):
@@ -238,7 +251,7 @@ async def pop_parked(keke_id):
     async with database.get_pool().acquire() as conn:
         return await conn.fetchrow(
             "DELETE FROM keke_parked WHERE keke_id = $1 "
-            "RETURNING keke_id, channel_id, message_id;",
+            "RETURNING keke_id, channel_id, message_id, stop_code, direction;",
             keke_id,
         )
 
