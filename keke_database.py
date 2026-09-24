@@ -66,6 +66,15 @@ async def init_tables():
         )
         await conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS keke_parked (
+                keke_id       INTEGER PRIMARY KEY REFERENCES kekes(keke_id) ON DELETE CASCADE,
+                channel_id    BIGINT NOT NULL,
+                message_id    BIGINT NOT NULL
+            );
+            """
+        )
+        await conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS keke_zone_state (
                 state         TEXT NOT NULL,
                 zone          TEXT NOT NULL CHECK (zone IN ('A', 'B', 'C')),
@@ -200,6 +209,38 @@ async def remove_lock(member_id, channel_id):
 async def get_locks():
     async with database.get_pool().acquire() as conn:
         return await conn.fetch("SELECT member_id, channel_id FROM keke_locks;")
+
+
+# ---------------------------------------------------------------------------
+# The "KEKE PARKED" block: one per keke, kept until the keke is back in service.
+# ---------------------------------------------------------------------------
+
+async def set_parked(keke_id, channel_id, message_id):
+    async with database.get_pool().acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO keke_parked (keke_id, channel_id, message_id)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (keke_id) DO UPDATE
+                SET channel_id = EXCLUDED.channel_id, message_id = EXCLUDED.message_id;
+            """,
+            keke_id, channel_id, message_id,
+        )
+
+
+async def get_parked():
+    async with database.get_pool().acquire() as conn:
+        return await conn.fetch("SELECT keke_id, channel_id, message_id FROM keke_parked;")
+
+
+async def pop_parked(keke_id):
+    """Remove and return the parked-block record for `keke_id` (None if none)."""
+    async with database.get_pool().acquire() as conn:
+        return await conn.fetchrow(
+            "DELETE FROM keke_parked WHERE keke_id = $1 "
+            "RETURNING keke_id, channel_id, message_id;",
+            keke_id,
+        )
 
 
 async def reset_fuel(state):
