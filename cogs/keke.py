@@ -41,6 +41,10 @@ from locations import LOCATIONS
 log = logging.getLogger("nvv.keke")
 
 STATE = "Delta"
+
+# Refuelling is deferred, so for now every bot (re)start refills all kekes to a
+# full tank. Set to False once real refuelling exists.
+RESET_FUEL_ON_DEPLOY = True
 COMMISSIONER_ROLES = ["Delta Commissioner of Commerce"]
 
 # A purchased keke's zone letter is the FIRST letter of the route it runs:
@@ -417,6 +421,11 @@ class Keke(commands.Cog):
         # otherwise the kekes would start driving with no channels to post in.
         await self.bot.wait_until_ready()
         self._refresh_channels()
+        if RESET_FUEL_ON_DEPLOY:
+            try:
+                await kdb.reset_fuel(STATE)
+            except Exception:
+                log.exception("keke engine: could not reset fuel")
         # Spawn loops for every purchased keke (survives bot restarts).
         try:
             rows = await kdb.get_kekes(STATE)
