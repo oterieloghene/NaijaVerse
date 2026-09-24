@@ -33,6 +33,7 @@ import database
 import keke_config as kc
 import keke_database as kdb
 import location_permissions as perms
+import locations
 from bank_database import BankError
 from bank_messages import announce_transaction
 from locations import LOCATIONS
@@ -81,6 +82,25 @@ def _zone_fullname(letter):
 
 def _is_on_route(stop_code, route):
     return stop_code in kc.ROUTES[route]["stop_codes"]
+
+
+async def _unlock_write(channel, member):
+    """Remove the personal send-deny the keke placed on the departure channel at
+    boarding. Mirrors location_permissions._apply: drop the overwrite entirely
+    when nothing else is left in it."""
+    if channel is None or member is None:
+        return
+    try:
+        overwrite = channel.overwrites_for(member)
+        if overwrite.send_messages is not False:
+            return
+        overwrite.send_messages = None
+        if overwrite.is_empty():
+            await channel.set_permissions(member, overwrite=None, reason="Keke drop-off")
+        else:
+            await channel.set_permissions(member, overwrite=overwrite, reason="Keke drop-off")
+    except discord.HTTPException:
+        log.exception("keke: could not lift boarding lock on #%s for %s", channel, member)
 
 
 def _stop_zone(stop_code, route=None):
@@ -193,7 +213,7 @@ class KekeUnit:
         next_stop = self._next_stop()
         if channel is not None:
             try:
-                await channel.send(self._status_block(next_stop))
+                await channel.send(self._status_block(kc.STOP_CODES[next_stop]))
             except discord.HTTPException:
                 log.exception("keke %s could not post stop block", self.keke_id)
         await self._sleep(kc.STOP_SECONDS)
@@ -261,19 +281,18 @@ class KekeUnit:
         log.warning("keke %s stranded: %s", self.keke_id, reason)
 
     async def _drop_passenger(self, p, channel, paid=True):
-        """Move the passenger to the destination channel and settle the fare."""
-        dest_code = p["location_code"]
-        dest = self.channel_map.get(dest_code)
-        member = None
-        if self.bot is not None:
-            member = self.bot.get_user(p["member_id"])
-        # Drop at the destination channel when the keke is parked there;
-        # otherwise (emergency drop-off) the passenger stays put and treks.
-        if paid and dest is not None and self.stop_code == dest_code and member is not None:
-            try:
-                await member.move_to(dest)
-            except discord.HTTPException:
-                log.exception("keke %s move_to failed", self.keke_id)
+        """Settle the fare, put the passenger at the destination, and lift the
+        boarding lock. The lock is always lifted (even on an emergency drop-off
+        or a failed fare) so nobody stays muted in the departure channel."""
+        board_channel = p.get("board_channel")
+        member = await self._get_member(board_channel, p["member_id"])
+        try:
+            dest_code = p["location_code"]
+            dest = self.channel_map.get(dest_code)
+            # Drop at the destination only when the keke is parked there;
+            # otherwise (emergency drop-off) the passenger stays put and treks.
+            if not (paid and dest is not None and self.stop_code == dest_code):
+                return
             try:
                 result = await kdb.credit_fare(
                     STATE, p["player_id"], p["name"], p["fare"]
@@ -286,6 +305,10 @@ class KekeUnit:
                     except discord.HTTPException:
                         pass
                 return
+            # Lift the send-deny BEFORE syncing: sync_member_permissions never
+            # clears an explicit member-level send-deny.
+            await self._release_lock(p, member)
+            await self._set_player_location(p, member, dest_code)
             if channel is not None:
                 text = MSG_DROPPED.replace(
                     "@player", f"<@{p['member_id']}>"
@@ -294,21 +317,38 @@ class KekeUnit:
                     await channel.send(text)
                 except discord.HTTPException:
                     pass
-            await self._set_player_location(p, dest_code)
+        finally:
+            await self._release_lock(p, member)
 
-    async def _set_player_location(self, p, location_code):
+    async def _get_member(self, channel, member_id):
+        """The guild Member (not just a User) — needed for roles/permissions."""
+        if channel is None:
+            return None
+        guild = channel.guild
+        member = guild.get_member(member_id)
+        if member is None:
+            try:
+                member = await guild.fetch_member(member_id)
+            except discord.HTTPException:
+                member = None
+        return member
+
+    async def _release_lock(self, p, member):
+        if p.get("lock_placed"):
+            p["lock_placed"] = False
+            await _unlock_write(p.get("board_channel"), member)
+
+    async def _set_player_location(self, p, member, location_code):
         try:
             await database.update_player_field(p["player_id"], "current_sub_location", location_code)
         except Exception:
             log.exception("keke location update failed for %s", p["player_id"])
-        if self.bot is not None:
-            player = await database.get_player(p["player_id"])
-            member = self.bot.get_user(p["member_id"])
-            if player and member:
-                try:
-                    await perms.sync_member_permissions(member)
-                except Exception:
-                    log.exception("keke permission sync failed for %s", p["member_id"])
+            return
+        if member is not None:
+            try:
+                await perms.sync_member_permissions(member)
+            except Exception:
+                log.exception("keke permission sync failed for %s", p["member_id"])
 
     async def _sleep(self, seconds):
         try:
@@ -335,7 +375,10 @@ class Keke(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.kekes = {}  # keke_id -> KekeUnit
-        self._guild_map = {}  # guild_id -> {stop_code: channel}
+        # ONE flat map {stop_code: channel}. Every KekeUnit holds a reference to
+        # this same dict, and it is refreshed IN PLACE (never replaced), so the
+        # units always see the current channels.
+        self._stop_channels = {}
         self._ensure_engine_task()
 
     async def cog_load(self):
@@ -344,6 +387,8 @@ class Keke(commands.Cog):
     def cog_unload(self):
         for unit in list(self.kekes.values()):
             unit._loop_stop.set()
+        if self._engine_task is not None:
+            self._engine_task.cancel()
 
     def _ensure_engine_task(self):
         if self._engine_task is None:
@@ -351,7 +396,27 @@ class Keke(commands.Cog):
 
     _engine_task = None
 
+    def _refresh_channels(self):
+        """Rebuild {stop_code: channel} from every guild the bot is in."""
+        fresh = {}
+        for guild in self.bot.guilds:
+            for code, channel in perms.state_location_channels(guild, STATE).items():
+                fresh.setdefault(code, channel)
+        self._stop_channels.clear()
+        self._stop_channels.update(fresh)
+        missing = [c for c in kc.STOP_CODES if c not in self._stop_channels]
+        if missing:
+            log.warning(
+                "keke: %d of %d stop channels not found (category name must contain "
+                "%r and channel name must match the code): %s",
+                len(missing), len(kc.STOP_CODES), STATE, ", ".join(missing),
+            )
+
     async def _engine(self):
+        # Wait until the bot has connected and can see its guilds/channels,
+        # otherwise the kekes would start driving with no channels to post in.
+        await self.bot.wait_until_ready()
+        self._refresh_channels()
         # Spawn loops for every purchased keke (survives bot restarts).
         try:
             rows = await kdb.get_kekes(STATE)
@@ -361,7 +426,7 @@ class Keke(commands.Cog):
         for row in rows:
             if row["keke_id"] in self.kekes:
                 continue
-            unit = KekeUnit(row, self._guild_map)
+            unit = KekeUnit(row, self._stop_channels)
             unit.spawn(self.bot)
             self.kekes[row["keke_id"]] = unit
 
@@ -371,25 +436,36 @@ class Keke(commands.Cog):
 
     @commands.Cog.listener()
     async def on_guild_join(self, guild):
-        self._guild_map[guild.id] = perms.state_location_channels(guild, STATE)
+        self._refresh_channels()
 
     @commands.Cog.listener()
     async def on_ready(self):
-        for guild in self.bot.guilds:
-            self._guild_map.setdefault(
-                guild.id, perms.state_location_channels(guild, STATE)
-            )
-        if not self.kekes:
-            await self._engine()
+        self._refresh_channels()
+
+    @commands.Cog.listener()
+    async def on_guild_channel_create(self, channel):
+        self._refresh_channels()
+
+    @commands.Cog.listener()
+    async def on_guild_channel_delete(self, channel):
+        self._refresh_channels()
+
+    @commands.Cog.listener()
+    async def on_guild_channel_update(self, before, after):
+        # Renames or moving a channel to another category change the mapping.
+        if before.name != after.name or before.category_id != after.category_id:
+            self._refresh_channels()
 
     # ------------------------------------------------------------------
     # helpers
     # ------------------------------------------------------------------
 
     def _keke_here(self, channel):
-        """The keke currently parked at `channel` (its stop), if any."""
+        """The keke currently parked at `channel` (its stop), if any.
+        Matched by channel ID, so emoji/decoration in the channel name
+        (e.g. '🏥┃hospital-lobby') does not matter."""
         for unit in self.kekes.values():
-            if unit.stop_code == channel.name and unit.stop_channel_id() == channel.id:
+            if unit.stop_channel_id() == channel.id:
                 return unit
         return None
 
@@ -403,23 +479,22 @@ class Keke(commands.Cog):
     def _has_role(self, member, names):
         return any(r.name.casefold() in {n.casefold() for n in names} for r in member.roles)
 
-    async def _revoke_write(self, member, channel):
+    async def _lock_write(self, member, channel):
         """Boarding rule (1.9/section 7): the departure channel is locked for
         the passenger for the whole ride. sync_member_permissions never clears
-        an explicit send-deny, so the keke writes its own deny and clears it at
-        drop-off."""
+        an explicit send-deny, so the keke writes its own deny here and lifts
+        it at drop-off (KekeUnit._release_lock). Returns True if WE placed the
+        deny (a pre-existing staff mute is left alone, and never lifted)."""
         try:
-            perms = await channel.set_permissions(member, send_messages=False)
-            member.guild.members.cache_clear()
-            await channel.set_permissions(member, send_messages=None)
+            overwrite = channel.overwrites_for(member)
+            if overwrite.send_messages is False:
+                return False
+            overwrite.send_messages = False
+            await channel.set_permissions(member, overwrite=overwrite, reason="Keke boarding")
+            return True
         except discord.HTTPException:
-            pass
-
-    async def _grant_write(self, member, channel):
-        try:
-            await channel.set_permissions(member, send_messages=None)
-        except discord.HTTPException:
-            pass
+            log.exception("keke: could not lock #%s for %s", channel, member)
+            return False
 
     async def _gate_check(self, ctx, member, dest):
         """Message 7: role-gated channels need the gate-pass role to board.
@@ -452,11 +527,24 @@ class Keke(commands.Cog):
         codename = codename.strip().lower()
         dest = _effective_destination(codename)
         if dest is None:
+            log.info("keke: unknown codename %r", codename)
             await ctx.reply(MSG_INVALID_DEST)
             return
-        hub_cat, hub_loc, _hub_parent, is_hub_dropoff = dest
+        hub_cat, hub_loc, hub_parent, is_hub_dropoff = dest
+        # What the player actually asked for (differs from hub_parent when the
+        # destination is an exempt channel the keke jumps over).
+        asked = kc.codename_dest(f"!keke {codename}")
+        asked_name = asked[2] if asked else hub_parent
+
+        self._refresh_channels()
         unit = self._keke_here(ctx.channel)
         if unit is None:
+            where = ", ".join(f"#{u.keke_id}@{u.stop_code}" for u in self.kekes.values()) or "none running"
+            log.info("keke: no keke parked in #%s (kekes: %s)", ctx.channel, where)
+            await ctx.reply(MSG_INVALID_DEST)
+            return
+        # Already riding a keke.
+        if any(p["member_id"] == ctx.author.id for u in self.kekes.values() for p in u.passengers):
             await ctx.reply(MSG_INVALID_DEST)
             return
         # Gate pass (message 7) — checked before boarding.
@@ -474,31 +562,36 @@ class Keke(commands.Cog):
             else:
                 await ctx.reply(MSG_WRONG_ROUTE_SINGLE)
             return
+        # Player record (fetched BEFORE the capacity check so there is no await
+        # between checking for a free seat and taking it).
+        player = await self._player(ctx.author)
+        if player is None:
+            await ctx.reply(MSG_INVALID_DEST)
+            return
         # Capacity
         if len(unit.passengers) >= kc.CAPACITY:
             await ctx.reply(MSG_INVALID_DEST)
             return
         # Cash at hand (Q3: checked at board time, deducted at drop-off).
-        player = await self._player(ctx.author)
-        if player is None:
-            await ctx.reply(MSG_INVALID_DEST)
-            return
         fare = self._fare_to(unit, hub_loc)
         if fare is None or float(player["cash_balance"]) < fare:
             await ctx.reply(MSG_CANT_AFFORD)
             return
-        # Board: revolve write access on the departure channel, record passenger.
-        unit.passengers.append({
+        # Board: record the passenger, then lock the departure channel for them.
+        passenger = {
             "member_id": ctx.author.id,
             "player_id": player["player_id"],
             "name": player["character_name"],
             "fare": fare,
             "location_code": hub_loc,
-            "destination": hub_parent or hub_loc,
+            "destination": asked_name,
             "hub_cat": hub_cat,
             "is_hub_dropoff": is_hub_dropoff,
-        })
-        await self._revoke_write(ctx.author, ctx.channel)
+            "board_channel": ctx.channel,
+            "lock_placed": False,
+        }
+        unit.passengers.append(passenger)
+        passenger["lock_placed"] = await self._lock_write(ctx.author, ctx.channel)
 
     @commands.command(name="buy-keke", help="Delta Commissioner of Commerce buys a state keke.")
     async def buy_keke(self, ctx, zone: str):
@@ -519,11 +612,12 @@ class Keke(commands.Cog):
             f"Treasury balance: ₦{result['new_treasury_balance']:}."
         )
         # Spawn the new keke immediately.
+        self._refresh_channels()
         rows = await kdb.get_kekes(STATE)
         for row in rows:
             if row["keke_id"] in self.kekes:
                 continue
-            unit = KekeUnit(row, self._guild_map)
+            unit = KekeUnit(row, self._stop_channels)
             unit.spawn(self.bot)
             self.kekes[row["keke_id"]] = unit
         await announce_transaction(self.bot, ctx.guild, result)
