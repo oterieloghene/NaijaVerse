@@ -1034,6 +1034,7 @@ class Keke(commands.Cog):
         for unit in list(self.kekes.values()):
             if unit.zone in parsed and unit.running:
                 await unit.shutdown()
+                del self.kekes[unit.keke_id]
                 stopped.append(unit.keke_id)
         note = f" (#{', #'.join(str(i) for i in stopped)} pulling in)" if stopped \
             else " (none currently running there)"
