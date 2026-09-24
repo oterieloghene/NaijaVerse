@@ -8,6 +8,10 @@ State Treasury at arrival.
 
 Tables (created automatically by init_tables(), safe to run on every start):
     kekes           one row per owned unit: zone, fuel litres, purchaser.
+    keke_locks      the "can't write here while riding" lock placed on a
+                    passenger's departure channel. Riders live only in memory,
+                    so a restart mid-ride would leave the lock behind forever;
+                    this table lets the bot find and lift them on startup.
     keke_fuel_log   the fuel each unit burns per trip. Refueling is DEFERRED by
                     the user, so this log never moves money — it only records
                     litres against the tank.
@@ -36,6 +40,16 @@ async def init_tables():
                 fuel_liters   NUMERIC(6, 3) NOT NULL DEFAULT 30 CHECK (fuel_liters >= 0),
                 purchased_by  BIGINT,
                 created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            """
+        )
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS keke_locks (
+                member_id     BIGINT NOT NULL,
+                channel_id    BIGINT NOT NULL,
+                created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (member_id, channel_id)
             );
             """
         )
@@ -124,6 +138,28 @@ async def buy_keke(state, zone, buyer_id):
                 "sender": bank._party(treasury, new_treasury_balance), "receiver": None,
                 "from_label": treasury["name"], "to_label": f"{state} Keke (zone {zone})",
             }
+
+
+async def add_lock(member_id, channel_id):
+    async with database.get_pool().acquire() as conn:
+        await conn.execute(
+            "INSERT INTO keke_locks (member_id, channel_id) VALUES ($1, $2) "
+            "ON CONFLICT DO NOTHING;",
+            member_id, channel_id,
+        )
+
+
+async def remove_lock(member_id, channel_id):
+    async with database.get_pool().acquire() as conn:
+        await conn.execute(
+            "DELETE FROM keke_locks WHERE member_id = $1 AND channel_id = $2;",
+            member_id, channel_id,
+        )
+
+
+async def get_locks():
+    async with database.get_pool().acquire() as conn:
+        return await conn.fetch("SELECT member_id, channel_id FROM keke_locks;")
 
 
 async def reset_fuel(state):
