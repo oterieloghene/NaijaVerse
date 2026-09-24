@@ -109,6 +109,21 @@ def _is_on_route(stop_code, route):
     return stop_code in kc.ROUTES[route]["stop_codes"]
 
 
+async def _fetch_member(channel, member_id):
+    """The guild Member (not just a User) for `member_id` in the guild of
+    `channel` — needed for roles/permissions. None if they can't be found."""
+    if channel is None:
+        return None
+    guild = channel.guild
+    member = guild.get_member(member_id)
+    if member is None:
+        try:
+            member = await guild.fetch_member(member_id)
+        except discord.HTTPException:
+            member = None
+    return member
+
+
 async def _send_quiet(channel, content):
     """Post a keke status message without notifying anyone: Discord's @silent
     flag (no push/desktop notification for the channel) and no mention pings,
@@ -125,20 +140,24 @@ async def _send_quiet(channel, content):
 async def _unlock_write(channel, member):
     """Remove the personal send-deny the keke placed on the departure channel at
     boarding. Mirrors location_permissions._apply: drop the overwrite entirely
-    when nothing else is left in it."""
+    when nothing else is left in it (a personal Read Message History allow, for
+    example, is kept). Returns True when the lock is gone or was never there,
+    False when it could not be lifted."""
     if channel is None or member is None:
-        return
+        return False
     try:
         overwrite = channel.overwrites_for(member)
         if overwrite.send_messages is not False:
-            return
+            return True
         overwrite.send_messages = None
         if overwrite.is_empty():
             await channel.set_permissions(member, overwrite=None, reason="Keke drop-off")
         else:
             await channel.set_permissions(member, overwrite=overwrite, reason="Keke drop-off")
+        return True
     except discord.HTTPException:
         log.exception("keke: could not lift boarding lock on #%s for %s", channel, member)
+        return False
 
 
 def _stop_zone(stop_code, route=None):
@@ -496,74 +515,85 @@ class KekeUnit:
         log.warning("keke %s stranded: %s", self.keke_id, reason)
 
     async def _drop_passenger(self, p, channel, paid=True):
-        """Settle the fare, put the passenger at the destination, and lift the
-        boarding lock. The lock is always lifted (even on an emergency drop-off
-        or a failed fare) so nobody stays muted in the departure channel."""
+        """Settle the fare, put the passenger at the destination and lift the
+        boarding lock so the arrival channel becomes writable for them.
+        Emergency drop-off (paid=False): they get down at the keke's CURRENT
+        stop, which becomes their location. Whatever happens, the lock is
+        lifted and their permissions re-synced, so nobody stays muted."""
         board_channel = p.get("board_channel")
         member = await self._get_member(board_channel, p["member_id"])
+        moved = False
         try:
             dest_code = p["location_code"]
             dest = self.channel_map.get(dest_code)
-            # Drop at the destination only when the keke is parked there;
-            # otherwise (emergency drop-off) the passenger stays put and treks.
-            if not (paid and dest is not None and self.stop_code == dest_code):
-                return
-            try:
-                result = await kdb.credit_fare(
-                    STATE, p["player_id"], p["name"], p["fare"]
-                )
-                fare_text = cfg.money(result["fare"])
-            except BankError as exc:
+            if paid and dest is not None and self.stop_code == dest_code:
+                try:
+                    result = await kdb.credit_fare(
+                        STATE, p["player_id"], p["name"], p["fare"]
+                    )
+                    fare_text = cfg.money(result["fare"])
+                except BankError as exc:
+                    if channel is not None:
+                        try:
+                            await channel.send(str(exc))
+                        except discord.HTTPException:
+                            pass
+                    return
+                # Lift the send-deny BEFORE syncing: sync_member_permissions never
+                # clears an explicit member-level send-deny.
+                await self._release_lock(p, member)
+                moved = await self._set_player_location(p, member, dest_code)
                 if channel is not None:
+                    text = MSG_DROPPED.replace(
+                        "@player", f"<@{p['member_id']}>"
+                    ).replace("₦{fare}", fare_text)
                     try:
-                        await channel.send(str(exc))
+                        await channel.send(text)
                     except discord.HTTPException:
                         pass
-                return
-            # Lift the send-deny BEFORE syncing: sync_member_permissions never
-            # clears an explicit member-level send-deny.
-            await self._release_lock(p, member)
-            await self._set_player_location(p, member, dest_code)
-            if channel is not None:
-                text = MSG_DROPPED.replace(
-                    "@player", f"<@{p['member_id']}>"
-                ).replace("₦{fare}", fare_text)
-                try:
-                    await channel.send(text)
-                except discord.HTTPException:
-                    pass
+            elif not paid:
+                await self._release_lock(p, member)
+                moved = await self._set_player_location(p, member, self.stop_code)
         finally:
             await self._release_lock(p, member)
+            if not moved and member is not None:
+                # Location unchanged: restore the write access the boarding lock
+                # replaced on their current channel.
+                try:
+                    await perms.sync_member_permissions(member)
+                except Exception:
+                    log.exception("keke permission sync failed for %s", p["member_id"])
 
     async def _get_member(self, channel, member_id):
-        """The guild Member (not just a User) — needed for roles/permissions."""
-        if channel is None:
-            return None
-        guild = channel.guild
-        member = guild.get_member(member_id)
-        if member is None:
-            try:
-                member = await guild.fetch_member(member_id)
-            except discord.HTTPException:
-                member = None
-        return member
+        return await _fetch_member(channel, member_id)
 
     async def _release_lock(self, p, member):
-        if p.get("lock_placed"):
-            p["lock_placed"] = False
-            await _unlock_write(p.get("board_channel"), member)
+        """Lift every boarding lock this passenger holds (the departure channel
+        and the rooms inside it). A lock that can't be lifted stays on the list
+        and on record, so the startup sweep will retry it."""
+        for channel in list(p.get("locks", [])):
+            if await _unlock_write(channel, member):
+                p["locks"].remove(channel)
+                try:
+                    await kdb.remove_lock(p["member_id"], channel.id)
+                except Exception:
+                    log.exception("keke: could not clear lock record for %s", p["member_id"])
 
     async def _set_player_location(self, p, member, location_code):
+        """Update the player's location and re-sync their channel permissions
+        (the new location becomes writable, the old one read-only). Returns True
+        when the location was updated."""
         try:
             await database.update_player_field(p["player_id"], "current_sub_location", location_code)
         except Exception:
             log.exception("keke location update failed for %s", p["player_id"])
-            return
+            return False
         if member is not None:
             try:
                 await perms.sync_member_permissions(member)
             except Exception:
                 log.exception("keke permission sync failed for %s", p["member_id"])
+        return True
 
     async def _sleep(self, seconds):
         try:
@@ -632,6 +662,14 @@ class Keke(commands.Cog):
         # otherwise the kekes would start driving with no channels to post in.
         await self.bot.wait_until_ready()
         self._refresh_channels()
+        try:
+            await self._clear_stale_locks()
+        except Exception:
+            log.exception("keke engine: stale-lock sweep failed")
+        try:
+            await self._ensure_stop_history()
+        except Exception:
+            log.exception("keke engine: stop history setup failed")
         if RESET_FUEL_ON_DEPLOY:
             try:
                 await kdb.reset_fuel(STATE)
@@ -656,6 +694,63 @@ class Keke(commands.Cog):
             for u in self.kekes.values()
         ))
 
+    async def _clear_stale_locks(self):
+        """Riders exist only in memory, so after a restart nobody is riding:
+        lift every boarding lock still on record and restore those players'
+        normal access (otherwise they would stay muted in their departure
+        channel and its rooms forever, because the permission sync never
+        touches an explicit send-deny)."""
+        try:
+            rows = await kdb.get_locks()
+        except Exception:
+            log.exception("keke: could not read boarding locks")
+            return
+        to_sync = {}
+        for row in rows:
+            channel = self.bot.get_channel(row["channel_id"])
+            member = await _fetch_member(channel, row["member_id"])
+            done = channel is None or member is None or await _unlock_write(channel, member)
+            if not done:
+                continue
+            try:
+                await kdb.remove_lock(row["member_id"], row["channel_id"])
+            except Exception:
+                log.exception("keke: could not clear lock record")
+            if member is not None:
+                to_sync[member.id] = member
+        for member in to_sync.values():
+            try:
+                await perms.sync_member_permissions(member)
+            except Exception:
+                log.exception("keke permission sync failed for %s", member.id)
+
+    async def _ensure_stop_history(self):
+        """Read Message History is permanently ON at every keke stop channel for
+        everyone whose ROLE gives them access there, wherever they are and for as
+        long as they are in the state. Set once on the roles themselves (not per
+        player), so it can never depend on a player's location or on a permission
+        sync having run. Viewing is still gated exactly as before: roles decide
+        who can see a stop, and the bot hides it from anyone failing the full
+        rules or living in another state."""
+        for code in kc.STOP_CODES:
+            channel = self._stop_channels.get(code)
+            if channel is None:
+                continue
+            for target, overwrite in list(channel.overwrites.items()):
+                if not isinstance(target, discord.Role):
+                    continue                      # only roles, never people
+                if overwrite.view_channel is not True:
+                    continue                      # not a role with access here
+                if overwrite.read_message_history is True:
+                    continue                      # already on
+                overwrite.read_message_history = True
+                try:
+                    await channel.set_permissions(
+                        target, overwrite=overwrite, reason="Keke stop: permanent message history"
+                    )
+                except discord.HTTPException:
+                    log.exception("keke: could not enable history for %s on #%s", target, channel)
+
     # ------------------------------------------------------------------
     # events
     # ------------------------------------------------------------------
@@ -671,6 +766,7 @@ class Keke(commands.Cog):
     @commands.Cog.listener()
     async def on_guild_channel_create(self, channel):
         self._refresh_channels()
+        await self._ensure_stop_history()
 
     @commands.Cog.listener()
     async def on_guild_channel_delete(self, channel):
@@ -681,6 +777,7 @@ class Keke(commands.Cog):
         # Renames or moving a channel to another category change the mapping.
         if before.name != after.name or before.category_id != after.category_id:
             self._refresh_channels()
+            await self._ensure_stop_history()
 
     # ------------------------------------------------------------------
     # helpers
@@ -705,6 +802,26 @@ class Keke(commands.Cog):
     def _has_role(self, member, names):
         return any(r.name.casefold() in {n.casefold() for n in names} for r in member.roles)
 
+    async def _lock_ride(self, member, channel, player):
+        """Boarding rule: the departure channel AND every room inside it the
+        rider could write in are locked for the whole ride. Returns the list of
+        channels WE locked (a pre-existing staff mute is left alone)."""
+        targets = [channel]
+        try:
+            writable = await perms.writable_codes(member, player)
+        except Exception:
+            log.exception("keke: could not work out the rooms to lock for %s", member.id)
+            writable = set()
+        for code in sorted(writable):
+            room = self._stop_channels.get(code)
+            if room is not None and room.id != channel.id:
+                targets.append(room)
+        locked = []
+        for target in targets:
+            if await self._lock_write(member, target):
+                locked.append(target)
+        return locked
+
     async def _lock_write(self, member, channel):
         """Boarding rule (1.9/section 7): the departure channel is locked for
         the passenger for the whole ride. sync_member_permissions never clears
@@ -717,10 +834,14 @@ class Keke(commands.Cog):
                 return False
             overwrite.send_messages = False
             await channel.set_permissions(member, overwrite=overwrite, reason="Keke boarding")
-            return True
         except discord.HTTPException:
             log.exception("keke: could not lock #%s for %s", channel, member)
             return False
+        try:
+            await kdb.add_lock(member.id, channel.id)
+        except Exception:
+            log.exception("keke: could not record lock for %s", member.id)
+        return True
 
     async def _gate_check(self, ctx, member, dest):
         """Message 7: role-gated channels need the gate-pass role to board.
@@ -814,11 +935,11 @@ class Keke(commands.Cog):
             "hub_cat": hub_cat,
             "is_hub_dropoff": is_hub_dropoff,
             "board_channel": ctx.channel,
-            "lock_placed": False,
+            "locks": [],
         }
         unit.passengers.append(passenger)
         await ctx.send(MSG_BOARDED.replace("@player", ctx.author.mention))
-        passenger["lock_placed"] = await self._lock_write(ctx.author, ctx.channel)
+        passenger["locks"] = await self._lock_ride(ctx.author, ctx.channel, player)
 
     @commands.command(name="buy-keke", help="Delta Commissioner of Commerce buys a state keke.")
     async def buy_keke(self, ctx, zone: str):
