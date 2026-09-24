@@ -1,23 +1,25 @@
 """
 cogs/permit.py
 
-Residence permits: !permit registers a player's address and grants "State Resident"; the physical
-card follows 20 minutes later, same mechanism as the NIN card (cogs/nin_delivery.py).
+Residence permits: !permit registers a player's official address; the physical card follows 20
+minutes later, same mechanism as the NIN card (cogs/nin_delivery.py). Run by Immigration Officers.
 
   !permit @player <house type>
       e.g.  !permit @Ada two-bedroom-flat
-      Run by a Housing Officer (or admin). The address is fully auto-generated — a random house
-      number and street name for that house type's category, e.g. "No 7, First Pipeline,
-      Low-Cost Housing, Delta" — and the name/NIN on the card come straight from the player's NIN
-      record, so the two documents always agree. Grants "State Resident" only; running it again
-      for the same player (a different house type) keeps the permit number, updates everything
-      else, and resets the 14-day expiry.
-  !permitinfo [@player]   shows what's on file
-  !permithelp             lists the valid house type codes
+      The player must ALREADY hold the role that house type requires (document_config's
+      HOUSE_PREREQUISITE_ROLES / GOVERNMENT_RESIDENCES) — this command checks it, it never grants
+      it. On success: the address is auto-generated for ordinary house types ("No 7, First
+      Pipeline, Mid-Class Residential, Delta") or fixed for the two government residences
+      ("Government House, Delta"); "{State} Resident" is granted (or "Abuja Resident" for the
+      President/VP); name/NIN/portrait come from the player's NIN record. Re-running it for the
+      same player keeps the permit number, updates everything else, and resets the 14-day expiry.
+  !permitinfo <low-cost|mid-class|high-class>   every resident of that category in YOUR state
+                                                 (governor/president tier always counts as high-class)
+  !permithelp             lists the house type codes, their prerequisites, and the government ones
   !permitcard [@player]   (admin) posts a card here now — no player = dummy card for layout testing
 
 The bot needs Send Messages + Attach Files in every state's parcel-pickup, and Manage Roles with
-its role above "State Resident".
+its role above every "{State} Resident" / "Abuja Resident" role.
 """
 
 import io
@@ -27,22 +29,24 @@ from discord.ext import commands, tasks
 
 import database
 import document_config as cfg
+from cogs.onboarding import IMMIGRATION_STAFF_ROLES
 from location_permissions import state_location_channels, sync_member_permissions
 from permit_card import generate_permit_card, register_permit, sample_card_data
 
 NO_PINGS = discord.AllowedMentions.none()
-HOUSING_STAFF_ROLES = {"housing officer"}
+HOUSE_CATEGORY_ALIASES = {"low-cost": "low_cost_housing", "mid-class": "mid_class_residential",
+                          "high-class": "high_class_residential"}
 
 
-def housing_staff_only():
-    """!permit: Housing Officers (or admins) only."""
+def immigration_staff_only():
+    """!permit / !permitinfo: Immigration Officers (or admins) only."""
     async def predicate(ctx):
         member = ctx.author
         if member.guild_permissions.administrator:
             return True
-        if any(r.name.casefold() in HOUSING_STAFF_ROLES for r in member.roles):
+        if any(r.name.casefold() in IMMIGRATION_STAFF_ROLES for r in member.roles):
             return True
-        raise commands.CheckFailure("Only Housing Officers can use this command.")
+        raise commands.CheckFailure("Only Immigration Officers can use this command.")
     return commands.check(predicate)
 
 
@@ -114,7 +118,7 @@ class Permit(commands.Cog):
 
     @commands.command(name="permit")
     @commands.guild_only()
-    @housing_staff_only()
+    @immigration_staff_only()
     async def permit(self, ctx, member: discord.Member, house_type: str):
         target = await database.get_player_by_discord_id(member.id)
         if not target or not target["current_state"]:
@@ -122,22 +126,23 @@ class Permit(commands.Cog):
             return
 
         try:
-            row, house_label = await register_permit(dict(target), house_type, target["current_state"])
+            row, house_label, grant_role_name = await register_permit(
+                dict(target), house_type.lower(), target["current_state"], [r.name for r in member.roles])
         except ValueError as exc:
             await ctx.send(str(exc))
             return
 
-        role = discord.utils.find(lambda r: r.name.lower() == cfg.STATE_RESIDENT_ROLE.lower(), ctx.guild.roles)
         problem = None
-        try:
-            if role:
-                await member.add_roles(role, reason="Residence permit registered")
-            else:
-                problem = f"find the role \"{cfg.STATE_RESIDENT_ROLE}\" on this server"
-        except discord.HTTPException:
-            problem = "assign the role (is my role above it?)"
-
-        await sync_member_permissions(member)   # write access follows the role change immediately
+        if grant_role_name:
+            role = discord.utils.find(lambda r: r.name.lower() == grant_role_name.lower(), ctx.guild.roles)
+            try:
+                if role:
+                    await member.add_roles(role, reason="Residence permit registered")
+                else:
+                    problem = f'find the role "{grant_role_name}" on this server'
+            except discord.HTTPException:
+                problem = "assign the role (is my role above it?)"
+            await sync_member_permissions(member)   # write access follows the role change immediately
 
         lines = [f"Registered {member.mention}: **{house_label}**, {row['address']}",
                  f"Permit No. **{row['permit_number']}** · ready for pickup in about "
@@ -149,19 +154,54 @@ class Permit(commands.Cog):
 
     @commands.command(name="permitinfo")
     @commands.guild_only()
-    async def permit_info(self, ctx, member: discord.Member = None):
-        member = member or ctx.author
-        player = await database.get_player_by_discord_id(member.id)
-        row = await database.get_residence_permit_by_player(player["player_id"]) if player else None
-        if row is None:
-            await ctx.send(f"{member.mention} has no residence permit on file.", allowed_mentions=NO_PINGS)
+    @immigration_staff_only()
+    async def permit_info(self, ctx, category: str = None):
+        """!permitinfo <low-cost|mid-class|high-class> — every resident of that category in your state."""
+        category_key = HOUSE_CATEGORY_ALIASES.get((category or "").lower())
+        if category_key is None:
+            await ctx.send("Usage: `!permitinfo <low-cost|mid-class|high-class>`.")
             return
-        await ctx.send(
-            f"**{row['full_name']}** — {row['residence_type']}\n{row['address']}\n"
-            f"Permit No. {row['permit_number']} · issued {row['date_of_issuance']:%d %b %Y} · "
-            f"expires {row['expiry_date']:%d %b %Y}",
-            allowed_mentions=NO_PINGS,
-        )
+
+        officer = await database.get_player_by_discord_id(ctx.author.id)
+        if not officer or not officer["current_state"]:
+            await ctx.send("You need to be immigrated yourself before running this — "
+                           "your own record is what tells me which state to report on.")
+            return
+        state = officer["current_state"]
+
+        rows = await database.get_residence_permits_by_state(state)
+        wanted_types = {label for code, (key, label) in cfg.HOUSE_TYPES.items() if key == category_key and label}
+        wanted_types |= {label for gov in cfg.GOVERNMENT_RESIDENCES.values()
+                        for label, _ in gov["holders"].values()}   # governor/president tier -> counts as high-class
+        if category_key != "high_class_residential":
+            wanted_types -= {label for gov in cfg.GOVERNMENT_RESIDENCES.values() for label, _ in gov["holders"].values()}
+        rows = [r for r in rows if r["residence_type"] in wanted_types]
+
+        category_title = cfg.HOUSE_CATEGORY_LABELS[category_key]
+        if not rows:
+            await ctx.send(f"No {category_title} residents registered in {state} yet.")
+            return
+
+        header = f"🏛️ **Residence Permits — {state.upper()} · {category_title}** ({len(rows)} resident{'s' if len(rows) != 1 else ''})\n"
+        entries = []
+        for i, r in enumerate(rows, 1):
+            member = ctx.guild.get_member(r["discord_id"])
+            who = member.mention if member else f"(left the server)"
+            entries.append(
+                f"{i}. **{r['full_name']}** — {who}\n"
+                f"   🏠 {r['residence_type']} — {r['address']}\n"
+                f"   Permit No. {r['permit_number']} · NIN {r['nin'] or '—'}\n"
+                f"   Issued {r['date_of_issuance']:%d %b %Y} · Expires {r['expiry_date']:%d %b %Y}"
+            )
+
+        message = header
+        for entry in entries:
+            if len(message) + len(entry) + 2 > 1900:
+                await ctx.send(message, allowed_mentions=NO_PINGS)
+                message = ""
+            message += entry + "\n\n"
+        if message.strip():
+            await ctx.send(message, allowed_mentions=NO_PINGS)
 
     @commands.command(name="permithelp")
     @commands.guild_only()
@@ -169,7 +209,14 @@ class Permit(commands.Cog):
         lines = ["**House types for `!permit @player <code>`:**"]
         for code, (category_key, label) in cfg.HOUSE_TYPES.items():
             category = cfg.HOUSE_CATEGORY_LABELS[category_key]
-            lines.append(f"`{code}` — {label} ({category})")
+            prereq = " and ".join(cfg.HOUSE_PREREQUISITE_ROLES.get(code, [])) or "none beyond arrival"
+            if label:
+                lines.append(f"`{code}` — {label} ({category}) · needs: {prereq}")
+        lines.append("\n**Government residences** (label depends on which role the player holds):")
+        for code, gov in cfg.GOVERNMENT_RESIDENCES.items():
+            holders = " / ".join(f'{r} → "{label}"' for r, (label, _) in gov["holders"].items())
+            lines.append(f"`{code}` — needs \"{gov['shared_role']}\" plus one of: {holders}")
+        lines.append("\nSee `!permitinfo <low-cost|mid-class|high-class>` for who's already registered.")
         await ctx.send("\n".join(lines))
 
     @commands.command(name="permitcard")
