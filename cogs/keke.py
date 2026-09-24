@@ -11,9 +11,9 @@ Engine
 ------
 The bot drives every purchased keke in a continuous to-and-fro loop over its
 route's ACTUAL stops (17-stop spine, exempt channels jumped over). At each
-stop the keke waits STOP_SECONDS for boarding, publishes the arrival/
-departure block (message 3), burns the segment's fuel, and drives MOVE_SECONDS
-to the next stop. Route ends are turnarounds (direction flips).
+stop the keke posts an ARRIVAL block, waits STOP_SECONDS for boarding, then
+burns the segment's fuel, posts a DEPARTURE block (both self-delete after
+BLOCK_LIFETIME_SECONDS) and drives MOVE_SECONDS to the next stop. Route ends are turnarounds (direction flips).
 
 Fares are checked against the player's cash at hand at BOARD time and
 deducted (plus state treasury credit) at DROP-OFF (Q3). Exception drop-off:
@@ -58,16 +58,23 @@ MSG_WRONG_ROUTE_SINGLE = "I nor dy go that area oga/madam 🛺💨"
 MSG_GATE_PASS = "Not accessible❗You need gate pass 🪪"
 MSG_INVALID_DEST = "invalid destination ❌"
 
-ARRIVAL_DEPARTURE = """━━━━━━━━━━━━━━━━━━━━
-🛺 KEKE ARRIVAL/DEPARTURE
+# Two separate blocks (message 3): ARRIVAL is posted when the keke pulls into a
+# stop, DEPARTURE when it leaves. Each one deletes itself after
+# BLOCK_LIFETIME_SECONDS.
+BLOCK_LIFETIME_SECONDS = 10
+
+STOP_BLOCK = """━━━━━━━━━━━━━━━━━━━━
+🛺 KEKE {title}
 From: {from_zone}
 To: {to_zone}
 Passengers: {count}/{capacity}
 Passengers on Board:
 {pax}
-Status: 🟢 Arrival/Departing
+Status: 🟢 {status}
 Estimated Arrival: {eta}
 ━━━━━━━━━━━━━━━━━━━━"""
+
+MSG_BOARDED = "@player sitdown well o, we go soon move o"
 
 MSG_DROPPED = "@player you don reach o. Your money na ₦{fare}, Thank you o 😊💸"
 MSG_EXCEPTION_DROPOFF = (
@@ -213,16 +220,27 @@ class KekeUnit:
         for p in [p for p in self.passengers if p["location_code"] == self.stop_code]:
             self.passengers.remove(p)
             await self._drop_passenger(p, channel, paid=True)
-        route = kc.ROUTES[self.route]
-        next_stop = self._next_stop()
-        if channel is not None:
-            try:
-                await channel.send(self._status_block(kc.STOP_CODES[next_stop]))
-            except discord.HTTPException:
-                log.exception("keke %s could not post stop block", self.keke_id)
+        # Arrival block now; the departure block is posted in _tick_move when
+        # the keke actually leaves, after the STOP_SECONDS dwell.
+        await self._post_block("ARRIVAL", "Arrived")
         await self._sleep(kc.STOP_SECONDS)
 
-    def _status_block(self, next_stop_code):
+    async def _post_block(self, title, status):
+        """Post the arrival/departure block at the current stop; it deletes
+        itself after BLOCK_LIFETIME_SECONDS."""
+        channel = self.channel_map.get(self.stop_code)
+        if channel is None:
+            return
+        next_stop = self._next_stop()
+        try:
+            await channel.send(
+                self._status_block(kc.STOP_CODES[next_stop], title, status),
+                delete_after=BLOCK_LIFETIME_SECONDS,
+            )
+        except discord.HTTPException:
+            log.exception("keke %s could not post %s block", self.keke_id, title)
+
+    def _status_block(self, next_stop_code, title="ARRIVAL", status="Arrived"):
         pax = "\n".join(f"<@{p['member_id']}>" for p in self.passengers) or "—"
         from_zone = _zone_fullname(_stop_zone(self.stop_code, self.route))
         to_zone = _zone_fullname(_stop_zone(next_stop_code, self.route))
@@ -231,7 +249,9 @@ class KekeUnit:
             kc.MOVE_SECONDS + kc.STOP_SECONDS
         )
         eta = f"{max(1, round(seconds / 60))}mins"
-        return ARRIVAL_DEPARTURE.format(
+        return STOP_BLOCK.format(
+            title=title,
+            status=status,
             from_zone=from_zone,
             to_zone=to_zone,
             count=len(self.passengers),
@@ -260,6 +280,8 @@ class KekeUnit:
             await self._emergency_dropoff(str(exc))
             self._loop_stop.set()
             return
+        # Fuel is fine, so the keke really is leaving: post the departure block.
+        await self._post_block("DEPARTURE", "Departing")
         await self._sleep(kc.MOVE_SECONDS)
         self._stop = next_stop
 
@@ -600,6 +622,7 @@ class Keke(commands.Cog):
             "lock_placed": False,
         }
         unit.passengers.append(passenger)
+        await ctx.send(MSG_BOARDED.replace("@player", ctx.author.mention))
         passenger["lock_placed"] = await self._lock_write(ctx.author, ctx.channel)
 
     @commands.command(name="buy-keke", help="Delta Commissioner of Commerce buys a state keke.")
