@@ -61,7 +61,7 @@ MSG_INVALID_DEST = "invalid destination ❌"
 # Two separate blocks (message 3): ARRIVAL is posted when the keke pulls into a
 # stop, DEPARTURE when it leaves. Each one deletes itself after
 # BLOCK_LIFETIME_SECONDS.
-BLOCK_LIFETIME_SECONDS = 10
+BLOCK_LIFETIME_SECONDS = 55
 
 STOP_BLOCK = """━━━━━━━━━━━━━━━━━━━━
 🛺 KEKE {title}
