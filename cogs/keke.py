@@ -62,6 +62,9 @@ MSG_WRONG_ROUTE_MULTI = "i nor dy go abeg! This keke dey go {route} 🛺💨"
 MSG_WRONG_ROUTE_SINGLE = "I nor dy go that area oga/madam 🛺💨"
 MSG_GATE_PASS = "Not accessible❗You need gate pass 🪪"
 MSG_INVALID_DEST = "invalid destination ❌"
+MSG_NO_KEKE_HERE = "No keke here, Wait for Keke!🤦"
+MSG_KEKE_FULL = "Make i lap you? 😂 🛺 💨"
+MSG_NO_PLAYER_RECORD = "Not authorised! Meet @immigrationofficer for help❗"
 
 # Two blocks per stop (message 3). ARRIVAL is posted when the keke pulls in and
 # is deleted after ARRIVAL_BLOCK_SECONDS; it is immediately replaced by a
@@ -95,6 +98,7 @@ MSG_EXCEPTION_DROPOFF = (
     "@player, tax force nor gree us reach {destination}. "
     "Come down here {dropoff} trek. Nor vex 😭🚶🏾"
 )
+MSG_FUEL_EMPTY = "Make ona nor vex, fuel don finish ⛽ {passengers}"
 
 
 def _route_name(route):
@@ -494,22 +498,45 @@ class KekeUnit:
         self._moving_to = None
 
     async def _emergency_dropoff(self, reason):
+        """Fuel ran out mid-route: everyone aboard is set down right here (not
+        their booked destination) and debited a partial fare for the distance
+        actually covered — departure stop to this stranded stop — not the
+        full fare they'd have paid on arrival."""
         channel = self.channel_map.get(self.stop_code)
-        dropoff_name = None
-        if channel is not None:
-            dropoff_name = channel.name
+        parts = []
         for p in list(self.passengers):
-            if channel is not None:
-                text = MSG_EXCEPTION_DROPOFF.format(
-                    destination=p["destination"],
-                    dropoff=dropoff_name or self.stop_code,
-                ).replace("@player", f"<@{p['member_id']}>")
+            try:
+                board_idx = kc.STOP_INDEX[p.get("board_stop", self.stop_code)]
+                current_idx = kc.STOP_INDEX[self.stop_code]
+                fare = kc.fare_for(abs(current_idx - board_idx) * kc.KM_PER_SEGMENT)
+            except KeyError:
+                fare = 0
+            fare_text = "₦0"
+            if fare > 0:
                 try:
-                    await channel.send(text)
-                except discord.HTTPException:
-                    pass
-            await self._drop_passenger(p, channel, paid=False)
+                    result = await kdb.credit_fare(STATE, p["player_id"], p["name"], fare)
+                    fare_text = cfg.money(result["fare"])
+                except BankError:
+                    log.exception(
+                        "keke %s: could not debit stranded fare for player %s",
+                        self.keke_id, p["player_id"],
+                    )
+            parts.append(f"{fare_text} <@{p['member_id']}>")
+            member = await self._get_member(channel, p["member_id"])
+            await self._release_lock(p, member)
+            moved = await self._set_player_location(p, member, self.stop_code)
+            if not moved and member is not None:
+                try:
+                    await perms.sync_member_permissions(member)
+                except Exception:
+                    log.exception("keke permission sync failed for %s", p["member_id"])
         self.passengers.clear()
+        if channel is not None and parts:
+            text = MSG_FUEL_EMPTY.format(passengers=", ".join(parts))
+            try:
+                await channel.send(text)
+            except discord.HTTPException:
+                pass
         # Park until the Commissioner refuels (deferred) — end the loop.
         self._loop_stop.set()
         log.warning("keke %s stranded: %s", self.keke_id, reason)
@@ -544,9 +571,15 @@ class KekeUnit:
                 await self._release_lock(p, member)
                 moved = await self._set_player_location(p, member, dest_code)
                 if channel is not None:
-                    text = MSG_DROPPED.replace(
-                        "@player", f"<@{p['member_id']}>"
-                    ).replace("₦{fare}", fare_text)
+                    if p.get("is_hub_dropoff"):
+                        text = MSG_EXCEPTION_DROPOFF.format(
+                            destination=p["destination"],
+                            dropoff=channel.name,
+                        ).replace("@player", f"<@{p['member_id']}>")
+                    else:
+                        text = MSG_DROPPED.replace(
+                            "@player", f"<@{p['member_id']}>"
+                        ).replace("₦{fare}", fare_text)
                     try:
                         await channel.send(text)
                     except discord.HTTPException:
@@ -895,7 +928,7 @@ class Keke(commands.Cog):
         if unit is None:
             where = ", ".join(f"#{u.keke_id}@{u.stop_code}" for u in self.kekes.values()) or "none running"
             log.info("keke: no keke parked in #%s (kekes: %s)", ctx.channel, where)
-            await ctx.reply(MSG_INVALID_DEST)
+            await ctx.reply(MSG_NO_KEKE_HERE)
             return
         # Already riding a keke.
         if any(p["member_id"] == ctx.author.id for u in self.kekes.values() for p in u.passengers):
@@ -920,11 +953,11 @@ class Keke(commands.Cog):
         # between checking for a free seat and taking it).
         player = await self._player(ctx.author)
         if player is None:
-            await ctx.reply(MSG_INVALID_DEST)
+            await ctx.reply(MSG_NO_PLAYER_RECORD)
             return
         # Capacity
         if len(unit.passengers) >= kc.CAPACITY:
-            await ctx.reply(MSG_INVALID_DEST)
+            await ctx.reply(MSG_KEKE_FULL)
             return
         # Cash at hand (Q3: checked at board time, deducted at drop-off).
         fare = self._fare_to(unit, hub_loc)
@@ -942,6 +975,7 @@ class Keke(commands.Cog):
             "hub_cat": hub_cat,
             "is_hub_dropoff": is_hub_dropoff,
             "board_channel": ctx.channel,
+            "board_stop": unit.stop_code,
             "locks": [],
         }
         unit.passengers.append(passenger)
