@@ -102,7 +102,7 @@ MIN_FARE = 100                     # under 1 km still costs ₦100
 # ---------------------------------------------------------------------------
 
 MOVE_SECONDS = 2                   # drive between two adjacent ACTUAL stops
-STOP_SECONDS = 10                  # boarding wait at each ACTUAL stop, incl. turnarounds
+STOP_SECONDS = 20                  # dwell at each ACTUAL stop (boarding window), incl. turnarounds
 
 
 def fare_for(km):
