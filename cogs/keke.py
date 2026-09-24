@@ -61,7 +61,7 @@ MSG_INVALID_DEST = "invalid destination ❌"
 # Two separate blocks (message 3): ARRIVAL is posted when the keke pulls into a
 # stop, DEPARTURE when it leaves. Each one deletes itself after
 # BLOCK_LIFETIME_SECONDS.
-BLOCK_LIFETIME_SECONDS = 55
+BLOCK_LIFETIME_SECONDS = 10
 
 STOP_BLOCK = """━━━━━━━━━━━━━━━━━━━━
 🛺 KEKE {title}
@@ -242,8 +242,17 @@ class KekeUnit:
 
     def _status_block(self, next_stop_code, title="ARRIVAL", status="Arrived"):
         pax = "\n".join(f"<@{p['member_id']}>" for p in self.passengers) or "—"
-        from_zone = _zone_fullname(_stop_zone(self.stop_code, self.route))
-        to_zone = _zone_fullname(_stop_zone(next_stop_code, self.route))
+        # From/To describe the whole leg the keke is on, not the next hop:
+        # e.g. an A<->B keke shows Delta North -> Delta Central on the way out
+        # and Delta Central -> Delta North on the way back. self._dir already
+        # points the way the keke is about to travel (see _next_stop).
+        route = kc.ROUTES[self.route]
+        first_zone = _zone_fullname(_stop_zone(kc.STOP_CODES[route["start"]]))
+        last_zone = _zone_fullname(_stop_zone(kc.STOP_CODES[route["end"]]))
+        if self._dir > 0:
+            from_zone, to_zone = first_zone, last_zone
+        else:
+            from_zone, to_zone = last_zone, first_zone
         remaining_segments = self._remaining_segments(next_stop_code)
         seconds = kc.STOP_SECONDS + remaining_segments * (
             kc.MOVE_SECONDS + kc.STOP_SECONDS
@@ -460,6 +469,12 @@ class Keke(commands.Cog):
             unit = KekeUnit(row, self._stop_channels)
             unit.spawn(self.bot)
             self.kekes[row["keke_id"]] = unit
+        # Console summary: several kekes on overlapping routes post their own
+        # arrival/departure blocks, so list what is actually running.
+        print(f"[keke] {len(self.kekes)} keke(s) running: " + ", ".join(
+            f"#{u.keke_id} zone {u.zone} ({u.route}, starts at {u.stop_code})"
+            for u in self.kekes.values()
+        ))
 
     # ------------------------------------------------------------------
     # events
