@@ -37,7 +37,7 @@ ZONETAGS = {"north": "A", "central": "B", "south": "C"}
 # exempt channels are jumped over and appear nowhere in this list.
 STOP_CODES = [
     # A = North (4)
-    "administrative-office",   # turnaround — Rural District (rural-district) jumped over
+    "administrative-block",   # turnaround — Rural District (rural-district) jumped over
     "bed-sitter",
     "line-houses",             # NORTH exception drop-off (hub) — for rural-district
     "immigration-office",
@@ -75,7 +75,7 @@ ONE_WAY_KM = {
 
 # Route definitions: (zone pair, stop span of the 17-stop backbone, one-way km).
 # Each loop covers its two zones in full, so the spans share B's five stops:
-# the A<->B keke runs administrative-office .. banking-hall, the B<->C keke
+# the A<->B keke runs administrative-block .. banking-hall, the B<->C keke
 # runs rental-desk .. commercial-district, and the C<->A keke runs the whole
 # spine.
 ROUTES = {
