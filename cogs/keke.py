@@ -14,7 +14,10 @@ route's ACTUAL stops (17-stop spine, exempt channels jumped over). At each
 stop the keke posts an ARRIVAL block, deletes it after ARRIVAL_BLOCK_SECONDS and
 replaces it with a "departing in N secs..." block (edited live every
 NOTICE_REFRESH_SECONDS) that stays until the STOP_SECONDS dwell is over, then burns the segment's fuel and drives
-MOVE_SECONDS to the next stop. Route ends are turnarounds (direction flips).
+MOVE_SECONDS to the next stop. No two kekes are ever in the same channel: a
+keke reserves the next stop before driving to it and waits (parked) while
+another keke is there or heading there. Two kekes facing each other on
+adjacent stops swap places, so they can never block each other. Route ends are turnarounds (direction flips).
 
 Fares are checked against the player's cash at hand at BOARD time and
 deducted (plus state treasury credit) at DROP-OFF (Q3). Exception drop-off:
@@ -67,6 +70,11 @@ MSG_INVALID_DEST = "invalid destination ❌"
 ARRIVAL_BLOCK_SECONDS = 5
 # The departing block is edited every NOTICE_REFRESH_SECONDS to show the time left.
 NOTICE_REFRESH_SECONDS = 15
+# A keke whose next stop is taken re-checks every WAIT_POLL_SECONDS.
+WAIT_POLL_SECONDS = 1
+# The traffic message is posted once a keke has been held up this long (a hold-up
+# of a second or two is not worth a message); it is deleted when the keke moves.
+TRAFFIC_MESSAGE_AFTER_SECONDS = 5
 
 STOP_BLOCK = """━━━━━━━━━━━━━━━━━━━━
 🛺 KEKE {title}
@@ -80,6 +88,7 @@ Estimated Arrival: {eta}
 ━━━━━━━━━━━━━━━━━━━━"""
 
 MSG_BOARDED = "@player sitdown well o, we go soon move o"
+MSG_TRAFFIC = "🚦 traffic dey today o 😩"
 
 MSG_DROPPED = "@player you don reach o. Your money na ₦{fare}, Thank you o 😊💸"
 MSG_EXCEPTION_DROPOFF = (
@@ -98,6 +107,19 @@ def _zone_fullname(letter):
 
 def _is_on_route(stop_code, route):
     return stop_code in kc.ROUTES[route]["stop_codes"]
+
+
+async def _send_quiet(channel, content):
+    """Post a keke status message without notifying anyone: Discord's @silent
+    flag (no push/desktop notification for the channel) and no mention pings,
+    even though the text may name passengers. Messages addressed to one player
+    (boarding, drop-off) do NOT use this — they are meant to ping."""
+    quiet = discord.AllowedMentions.none()
+    try:
+        return await channel.send(content, silent=True, allowed_mentions=quiet)
+    except TypeError:
+        # discord.py older than 2.2 has no `silent`; still suppress the mentions.
+        return await channel.send(content, allowed_mentions=quiet)
 
 
 async def _unlock_write(channel, member):
@@ -157,12 +179,17 @@ def _effective_destination(word):
 class KekeUnit:
     """Runtime state of one purchased keke and its loop task."""
 
-    def __init__(self, row, channel_map):
+    def __init__(self, row, channel_map, fleet=None):
         self.keke_id = row["keke_id"]
         self.zone = row["zone"]
         self.route = ZONE_ROUTE[self.zone]
         self.bot = None
         self.channel_map = channel_map
+        # Every keke on the road (the cog's {keke_id: KekeUnit}), so a unit can
+        # see who is where. Shared by reference, never copied.
+        self.fleet = fleet if fleet is not None else {}
+        self._moving_to = None   # stop index reserved/being driven to, else None
+        self._want = None        # stop index this keke is waiting to enter
         self.passengers = []  # list of dicts: {member_id, player_id, name,
         #                                       destination, fare, hub_dropoff}
         self.task = None
@@ -175,16 +202,106 @@ class KekeUnit:
         """+1 = north->south (towards route end), -1 = south->north."""
         return self._dir
 
+    @property
+    def running(self):
+        """True while the keke is on the road (a stranded keke is out of
+        service: it never blocks a stop and cannot be boarded)."""
+        return self.task is not None and not self._loop_stop.is_set()
+
     def stop_channel_id(self):
-        """Channel ID of the stop the keke is currently at, or None."""
+        """Channel ID of the stop the keke is parked at, or None (also None
+        while it is driving between stops or out of service)."""
+        if not self.running or self._moving_to is not None:
+            return None
         channel = self.channel_map.get(self.stop_code)
         return channel.id if channel is not None else None
+
+    # ------------------------------------------------------------------
+    # One keke per channel
+    # ------------------------------------------------------------------
+
+    def _claimant(self, index):
+        """The other running keke that holds stop `index` — parked there or
+        driving into it — or None if the stop is free."""
+        for other in self.fleet.values():
+            if other is self or not other.running:
+                continue
+            if other._moving_to == index:
+                return other
+            if other._moving_to is None and other._stop == index:
+                return other
+        return None
+
+    def _try_reserve(self, target):
+        """Atomically (no awaits) claim `target` for this keke. Returns True on
+        success. If the keke parked on `target` is waiting to enter OUR stop
+        (a head-on pair), swap: both are granted at the same instant, so
+        neither is ever in the other's channel and neither can block the other."""
+        other = self._claimant(target)
+        if other is None:
+            self._moving_to = target
+            return True
+        if other._moving_to is None and other._want == self._stop:
+            self._moving_to = target
+            other._moving_to = self._stop
+            return True
+        return False
+
+    async def _await_clear(self, target):
+        """Wait, parked, until the next stop is free (or we are swapped in),
+        then hold the reservation in self._moving_to."""
+        self._want = target
+        loop = asyncio.get_running_loop()
+        blocked_since = None
+        traffic_posted = False
+        traffic_msg = None
+        try:
+            while True:
+                if self._moving_to is not None:   # a head-on partner swapped with us
+                    return
+                if self._try_reserve(target):
+                    return
+                now = loop.time()
+                if blocked_since is None:
+                    blocked_since = now
+                if not traffic_posted and now - blocked_since >= TRAFFIC_MESSAGE_AFTER_SECONDS:
+                    traffic_posted = True
+                    traffic_msg = await self._post_traffic()
+                await self._sleep(WAIT_POLL_SECONDS)
+        finally:
+            self._want = None
+            await self._delete_msg(traffic_msg)   # traffic cleared: message goes
+
+    async def _post_traffic(self):
+        channel = self.channel_map.get(self.stop_code)
+        if channel is None:
+            return None
+        try:
+            return await _send_quiet(channel, MSG_TRAFFIC)
+        except discord.HTTPException:
+            log.exception("keke %s could not post traffic message", self.keke_id)
+            return None
+
+    def _pick_start(self):
+        """Where this keke enters the road. The route's own start if it is
+        free; otherwise the free stop on its route that is furthest from the
+        kekes already running, so kekes are spread out from the beginning."""
+        route = kc.ROUTES[self.route]
+        lo, hi = route["start"], route["end"]
+        if self._claimant(lo) is None:
+            return lo
+        free = [i for i in range(lo, hi + 1) if self._claimant(i) is None]
+        if not free:
+            return lo
+        others = [o._stop for o in self.fleet.values() if o is not self and o.running]
+        return max(free, key=lambda i: (min(abs(i - t) for t in others), -i))
 
     def spawn(self, bot):
         self.bot = bot
         self._loop_stop.clear()
-        start = kc.ROUTES[self.route]["start"]
-        self._stop = start
+        self._moving_to = None
+        self._want = None
+        self._stop = self._pick_start()
         self._dir = 1
         self.task = asyncio.create_task(self._run())
 
@@ -207,6 +324,8 @@ class KekeUnit:
             log.exception("keke %s loop crashed", self.keke_id)
         finally:
             self.task = None
+            self._moving_to = None
+            self._want = None
 
     def _next_stop(self):
         if self._dir > 0:
@@ -266,8 +385,8 @@ class KekeUnit:
             return None
         next_stop = self._next_stop()
         try:
-            return await channel.send(
-                self._status_block(kc.STOP_CODES[next_stop], title, status)
+            return await _send_quiet(
+                channel, self._status_block(kc.STOP_CODES[next_stop], title, status)
             )
         except discord.HTTPException:
             log.exception("keke %s could not post %s block", self.keke_id, title)
@@ -290,9 +409,12 @@ class KekeUnit:
             return
         try:
             next_stop = self._next_stop()
-            await message.edit(content=self._status_block(
-                kc.STOP_CODES[next_stop], self._departing_title(), "Departing"
-            ))
+            await message.edit(
+                content=self._status_block(
+                    kc.STOP_CODES[next_stop], self._departing_title(), "Departing"
+                ),
+                allowed_mentions=discord.AllowedMentions.none(),  # no re-ping on edit
+            )
         except discord.HTTPException:
             pass
 
@@ -345,8 +467,12 @@ class KekeUnit:
             await self._emergency_dropoff(str(exc))
             self._loop_stop.set()
             return
+        # Never enter a channel another keke is in or heading to: wait here
+        # until it is free (or swap with a head-on keke), then drive.
+        await self._await_clear(next_stop)
         await self._sleep(kc.MOVE_SECONDS)
         self._stop = next_stop
+        self._moving_to = None
 
     async def _emergency_dropoff(self, reason):
         channel = self.channel_map.get(self.stop_code)
@@ -520,7 +646,7 @@ class Keke(commands.Cog):
         for row in rows:
             if row["keke_id"] in self.kekes:
                 continue
-            unit = KekeUnit(row, self._stop_channels)
+            unit = KekeUnit(row, self._stop_channels, self.kekes)
             unit.spawn(self.bot)
             self.kekes[row["keke_id"]] = unit
         # Console summary: several kekes on overlapping routes post their own
@@ -718,7 +844,7 @@ class Keke(commands.Cog):
         for row in rows:
             if row["keke_id"] in self.kekes:
                 continue
-            unit = KekeUnit(row, self._stop_channels)
+            unit = KekeUnit(row, self._stop_channels, self.kekes)
             unit.spawn(self.bot)
             self.kekes[row["keke_id"]] = unit
         await announce_transaction(self.bot, ctx.guild, result)
