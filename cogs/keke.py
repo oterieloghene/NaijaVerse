@@ -28,6 +28,7 @@ keke's current stop and told to trek the rest (message 5).
 import asyncio
 import logging
 import math
+import re
 from collections import defaultdict
 
 import discord
@@ -90,6 +91,17 @@ Status: 🟢 {status}
 Estimated Arrival: {eta}
 ━━━━━━━━━━━━━━━━━━━━"""
 
+# Left in the keke's final parking channel when it is stopped (!keke-stop) or
+# runs out of fuel. It is NOT auto-deleted: it stays until the keke is back in
+# service (!keke-start, or a refuel / refill).
+PARKED_BLOCK = """━━━━━━━━━━━━━━━━━━━━
+🛺 KEKE PARKED
+From: {from_zone}
+To: {to_zone}
+⛽: {fuel}
+Status: 🔴 Not in Service
+━━━━━━━━━━━━━━━━━━━━"""
+
 MSG_BOARDED = "@player sitdown well o, we go soon move o"
 MSG_TRAFFIC = "🚦 traffic dey today o 😩"
 
@@ -99,6 +111,32 @@ MSG_EXCEPTION_DROPOFF = (
     "Come down here {dropoff} trek. Nor vex 😭🚶🏾"
 )
 MSG_FUEL_EMPTY = "Make ona nor vex, fuel don finish ⛽ {passengers}"
+
+
+def _fmt_fuel(liters):
+    return f"{float(liters):.2f} L"
+
+
+async def _clear_parked(bot, keke_id):
+    """Delete the keke's KEKE PARKED block (if it has one) and forget it. Called
+    when the keke goes back into service."""
+    try:
+        row = await kdb.pop_parked(keke_id)
+    except Exception:
+        log.exception("keke %s: could not read parked block record", keke_id)
+        return
+    if row is None:
+        return
+    channel = bot.get_channel(row["channel_id"])
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(row["channel_id"])
+        except discord.HTTPException:
+            return
+    try:
+        await channel.get_partial_message(row["message_id"]).delete()
+    except discord.HTTPException:
+        pass  # already gone
 
 
 def _route_name(route):
@@ -219,6 +257,9 @@ class KekeUnit:
         self._loop_stop = asyncio.Event()
         self._notice = None      # the live "departing in" message, if any
         self._depart_at = 0.0
+        # Set by !keke-stop when the keke still has passengers: it finishes the
+        # trip (drops everyone at their destination), then pulls in and parks.
+        self.stopping = False
 
     @property
     def direction(self):
@@ -369,6 +410,11 @@ class KekeUnit:
         for p in [p for p in self.passengers if p["location_code"] == self.stop_code]:
             self.passengers.remove(p)
             await self._drop_passenger(p, channel, paid=True)
+        # !keke-stop was issued and the last passenger has just got down: the
+        # trip is complete, so pull in here and park (no arrival/departing block).
+        if self.stopping and not self.passengers:
+            await self._finish_stop()
+            return
         arrival_secs = min(ARRIVAL_BLOCK_SECONDS, kc.STOP_SECONDS)
         wait_secs = kc.STOP_SECONDS - arrival_secs
         # 1) ARRIVAL block, then delete it and switch to the departing block.
@@ -537,9 +583,49 @@ class KekeUnit:
                 await channel.send(text)
             except discord.HTTPException:
                 pass
-        # Park until the Commissioner refuels (deferred) — end the loop.
+        # Park until the keke is refuelled: leave the KEKE PARKED block here.
+        await self.post_parked()
         self._loop_stop.set()
         log.warning("keke %s stranded: %s", self.keke_id, reason)
+
+    async def _finish_stop(self):
+        """Trip complete after !keke-stop: park here with the KEKE PARKED block
+        and take the keke off the road."""
+        await self.post_parked()
+        self.fleet.pop(self.keke_id, None)
+        self._loop_stop.set()
+
+    async def post_parked(self):
+        """Leave the KEKE PARKED block in the channel the keke is standing in.
+        Stays until the keke is back in service (see _clear_parked)."""
+        channel = self.channel_map.get(self.stop_code)
+        if channel is None or self.bot is None:
+            return
+        await _clear_parked(self.bot, self.keke_id)   # never two blocks for one keke
+        try:
+            row = await kdb.get_keke(self.keke_id)
+            fuel = _fmt_fuel(row["fuel_liters"]) if row is not None else "—"
+        except Exception:
+            log.exception("keke %s: could not read fuel for parked block", self.keke_id)
+            fuel = "—"
+        self._next_stop()   # points self._dir the way the keke was heading
+        route = kc.ROUTES[self.route]
+        first_zone = _zone_fullname(_stop_zone(kc.STOP_CODES[route["start"]]))
+        last_zone = _zone_fullname(_stop_zone(kc.STOP_CODES[route["end"]]))
+        if self._dir > 0:
+            from_zone, to_zone = first_zone, last_zone
+        else:
+            from_zone, to_zone = last_zone, first_zone
+        text = PARKED_BLOCK.format(from_zone=from_zone, to_zone=to_zone, fuel=fuel)
+        try:
+            message = await _send_quiet(channel, text)
+        except discord.HTTPException:
+            log.exception("keke %s could not post parked block", self.keke_id)
+            return
+        try:
+            await kdb.set_parked(self.keke_id, channel.id, message.id)
+        except Exception:
+            log.exception("keke %s: could not record parked block", self.keke_id)
 
     async def _drop_passenger(self, p, channel, paid=True):
         """Settle the fare, put the passenger at the destination and lift the
@@ -721,9 +807,21 @@ class Keke(commands.Cog):
         except Exception:
             log.exception("keke engine: could not load zone start/stop state — defaulting to all zones active")
             active_zones = set(kc.ZONES)
+        try:
+            parked = {r["keke_id"] for r in await kdb.get_parked()}
+        except Exception:
+            log.exception("keke engine: could not load parked blocks")
+            parked = set()
         for row in rows:
-            if row["keke_id"] in self.kekes or row["zone"] not in active_zones:
+            if row["keke_id"] in self.kekes:
                 continue
+            if row["zone"] not in active_zones:
+                # Still stopped: keep its parked block, but show the tank as it is now.
+                if row["keke_id"] in parked:
+                    await self._refresh_parked_fuel(row)
+                continue
+            # Back on the road: its old parked block (stopped / out of fuel) goes.
+            await _clear_parked(self.bot, row["keke_id"])
             unit = KekeUnit(row, self._stop_channels, self.kekes)
             unit.spawn(self.bot)
             self.kekes[row["keke_id"]] = unit
@@ -733,6 +831,21 @@ class Keke(commands.Cog):
             f"#{u.keke_id} zone {u.zone} ({u.route}, starts at {u.stop_code})"
             for u in self.kekes.values()
         ))
+
+    async def _refresh_parked_fuel(self, row):
+        """Update the fuel line of a stopped keke's parked block (e.g. after the
+        deploy refill)."""
+        try:
+            rec = next(r for r in await kdb.get_parked() if r["keke_id"] == row["keke_id"])
+            channel = self.bot.get_channel(rec["channel_id"]) or await self.bot.fetch_channel(rec["channel_id"])
+            message = await channel.fetch_message(rec["message_id"])
+            text = re.sub(r"(?m)^⛽:.*$", f"⛽: {_fmt_fuel(row['fuel_liters'])}", message.content)
+            if text != message.content:
+                await message.edit(content=text, allowed_mentions=discord.AllowedMentions.none())
+        except (StopIteration, discord.HTTPException):
+            pass
+        except Exception:
+            log.exception("keke %s: could not refresh parked block", row["keke_id"])
 
     async def _clear_stale_locks(self):
         """Riders exist only in memory, so after a restart nobody is riding:
@@ -930,6 +1043,10 @@ class Keke(commands.Cog):
             log.info("keke: no keke parked in #%s (kekes: %s)", ctx.channel, where)
             await ctx.reply(MSG_NO_KEKE_HERE)
             return
+        # !keke-stop issued: this keke is only finishing its current trip.
+        if unit.stopping:
+            await ctx.reply(MSG_NO_KEKE_HERE)
+            return
         # Already riding a keke.
         if any(p["member_id"] == ctx.author.id for u in self.kekes.values() for p in u.passengers):
             await ctx.reply(MSG_INVALID_DEST)
@@ -1038,10 +1155,15 @@ class Keke(commands.Cog):
         except Exception:
             log.exception("keke-start: could not load kekes")
             rows = []
+        # A keke still finishing its trip for an earlier !keke-stop just carries on.
+        for unit in self.kekes.values():
+            if unit.zone in parsed:
+                unit.stopping = False
         started = []
         for row in rows:
             if row["zone"] not in parsed or row["keke_id"] in self.kekes:
                 continue
+            await _clear_parked(self.bot, row["keke_id"])   # back in service: parked block goes
             unit = KekeUnit(row, self._stop_channels, self.kekes)
             unit.spawn(self.bot)
             self.kekes[row["keke_id"]] = unit
@@ -1064,14 +1186,25 @@ class Keke(commands.Cog):
             return
         for zone in parsed:
             await kdb.set_zone_active(STATE, zone, False)
-        stopped = []
+        stopped, finishing = [], []
         for unit in list(self.kekes.values()):
-            if unit.zone in parsed and unit.running:
+            if unit.zone not in parsed or not unit.running:
+                continue
+            if unit.passengers:
+                # Carrying passengers: complete the trip first, then pull in.
+                unit.stopping = True
+                finishing.append(unit.keke_id)
+            else:
                 await unit.shutdown()
-                del self.kekes[unit.keke_id]
+                await unit.post_parked()   # KEKE PARKED block stays until !keke-start
+                self.kekes.pop(unit.keke_id, None)
                 stopped.append(unit.keke_id)
-        note = f" (#{', #'.join(str(i) for i in stopped)} pulling in)" if stopped \
-            else " (none currently running there)"
+        notes = []
+        if stopped:
+            notes.append(f"#{', #'.join(str(i) for i in stopped)} pulling in")
+        if finishing:
+            notes.append(f"#{', #'.join(str(i) for i in finishing)} finishing trip with passengers first")
+        note = f" ({'; '.join(notes)})" if notes else " (none currently running there)"
         await ctx.reply(f"🔴 Keke service stopped in zone(s) {', '.join(parsed)}.{note}")
 
 
