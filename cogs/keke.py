@@ -119,24 +119,27 @@ def _fmt_fuel(liters):
 
 async def _clear_parked(bot, keke_id):
     """Delete the keke's KEKE PARKED block (if it has one) and forget it. Called
-    when the keke goes back into service."""
+    when the keke goes back into service. Returns (stop_code, direction): where it
+    was parked and which way it was heading, i.e. how it must re-enter the road
+    ((None, None) if it had no block)."""
     try:
         row = await kdb.pop_parked(keke_id)
     except Exception:
         log.exception("keke %s: could not read parked block record", keke_id)
-        return
+        return None, None
     if row is None:
-        return
+        return None, None
     channel = bot.get_channel(row["channel_id"])
     if channel is None:
         try:
             channel = await bot.fetch_channel(row["channel_id"])
         except discord.HTTPException:
-            return
+            return row["stop_code"], row["direction"]
     try:
         await channel.get_partial_message(row["message_id"]).delete()
     except discord.HTTPException:
         pass  # already gone
+    return row["stop_code"], row["direction"]
 
 
 def _route_name(route):
@@ -360,13 +363,24 @@ class KekeUnit:
         others = [o._stop for o in self.fleet.values() if o is not self and o.running]
         return max(free, key=lambda i: (min(abs(i - t) for t in others), -i))
 
-    def spawn(self, bot):
+    def spawn(self, bot, start_code=None, direction=None):
+        """Put the keke on the road. `start_code` is the stop it was parked at and
+        `direction` the way it was heading: it re-enters exactly there, that way
+        (if no other keke is in that channel)."""
         self.bot = bot
         self._loop_stop.clear()
         self._moving_to = None
         self._want = None
-        self._stop = self._pick_start()
-        self._dir = 1
+        self.stopping = False
+        route = kc.ROUTES[self.route]
+        idx = kc.STOP_INDEX.get(start_code) if start_code else None
+        if idx is not None and route["start"] <= idx <= route["end"] and self._claimant(idx) is None:
+            self._stop = idx
+            heading = direction if direction in (1, -1) else 1
+        else:
+            self._stop = self._pick_start()
+            heading = 1
+        self._dir = heading
         self.task = asyncio.create_task(self._run())
 
     @property
@@ -584,7 +598,7 @@ class KekeUnit:
             except discord.HTTPException:
                 pass
         # Park until the keke is refuelled: leave the KEKE PARKED block here.
-        await self.post_parked()
+        await self.post_parked(here=True)
         self._loop_stop.set()
         log.warning("keke %s stranded: %s", self.keke_id, reason)
 
@@ -595,24 +609,65 @@ class KekeUnit:
         self.fleet.pop(self.keke_id, None)
         self._loop_stop.set()
 
-    async def post_parked(self):
-        """Leave the KEKE PARKED block in the channel the keke is standing in.
-        Stays until the keke is back in service (see _clear_parked)."""
-        channel = self.channel_map.get(self.stop_code)
-        if channel is None or self.bot is None:
+    def _pick_home(self, parked_codes):
+        """Where this keke parks — and re-enters the road: the route's own start
+        stop, or, if a running or already-parked keke has it, the free stop on
+        its route furthest from the others (same spread as _pick_start)."""
+        route = kc.ROUTES[self.route]
+        lo, hi = route["start"], route["end"]
+        taken = {kc.STOP_INDEX[c] for c in parked_codes if c in kc.STOP_INDEX}
+
+        def free(i):
+            return self._claimant(i) is None and i not in taken
+
+        if free(lo):
+            return lo
+        candidates = [i for i in range(lo, hi + 1) if free(i)]
+        if not candidates:
+            return lo
+        others = [o._stop for o in self.fleet.values() if o is not self and o.running]
+        others += list(taken)
+        if not others:
+            return candidates[0]
+        return max(candidates, key=lambda i: (min(abs(i - t) for t in others), -i))
+
+    async def post_parked(self, here=False):
+        """Leave the KEKE PARKED block and park the keke: at its STARTING stop
+        after !keke-stop, or right where it stands (here=True) when the fuel ran
+        out. Stays until the keke is back in service (see _clear_parked); on
+        !keke-start / refuel it re-enters the road at this same stop."""
+        if self.bot is None:
             return
         await _clear_parked(self.bot, self.keke_id)   # never two blocks for one keke
+        try:
+            others = {r["stop_code"] for r in await kdb.get_parked()
+                      if r["keke_id"] != self.keke_id and r["stop_code"]}
+        except Exception:
+            log.exception("keke %s: could not read other parked kekes", self.keke_id)
+            others = set()
+        if here:
+            home_code = self.stop_code          # out of fuel: exactly where it finished
+        else:
+            home_code = kc.STOP_CODES[self._pick_home(others)]
+        channel = self.channel_map.get(home_code)
+        if channel is None:
+            home_code = self.stop_code
+            channel = self.channel_map.get(home_code)
+        if channel is None:
+            return
         try:
             row = await kdb.get_keke(self.keke_id)
             fuel = _fmt_fuel(row["fuel_liters"]) if row is not None else "—"
         except Exception:
             log.exception("keke %s: could not read fuel for parked block", self.keke_id)
             fuel = "—"
-        self._next_stop()   # points self._dir the way the keke was heading
+        # Out of fuel: it resumes the way it was heading. After !keke-stop it
+        # leaves its starting stop for the far end.
+        direction = self._dir if here else 1
         route = kc.ROUTES[self.route]
         first_zone = _zone_fullname(_stop_zone(kc.STOP_CODES[route["start"]]))
         last_zone = _zone_fullname(_stop_zone(kc.STOP_CODES[route["end"]]))
-        if self._dir > 0:
+        if direction > 0:
             from_zone, to_zone = first_zone, last_zone
         else:
             from_zone, to_zone = last_zone, first_zone
@@ -623,7 +678,7 @@ class KekeUnit:
             log.exception("keke %s could not post parked block", self.keke_id)
             return
         try:
-            await kdb.set_parked(self.keke_id, channel.id, message.id)
+            await kdb.set_parked(self.keke_id, channel.id, message.id, home_code, direction)
         except Exception:
             log.exception("keke %s: could not record parked block", self.keke_id)
 
@@ -821,9 +876,9 @@ class Keke(commands.Cog):
                     await self._refresh_parked_fuel(row)
                 continue
             # Back on the road: its old parked block (stopped / out of fuel) goes.
-            await _clear_parked(self.bot, row["keke_id"])
+            start_code, heading = await _clear_parked(self.bot, row["keke_id"])
             unit = KekeUnit(row, self._stop_channels, self.kekes)
-            unit.spawn(self.bot)
+            unit.spawn(self.bot, start_code, heading)
             self.kekes[row["keke_id"]] = unit
         # Console summary: several kekes on overlapping routes post their own
         # arrival/departure blocks, so list what is actually running.
@@ -1163,9 +1218,10 @@ class Keke(commands.Cog):
         for row in rows:
             if row["zone"] not in parsed or row["keke_id"] in self.kekes:
                 continue
-            await _clear_parked(self.bot, row["keke_id"])   # back in service: parked block goes
+            # Back in service: the parked block goes and the keke leaves from there.
+            start_code, heading = await _clear_parked(self.bot, row["keke_id"])
             unit = KekeUnit(row, self._stop_channels, self.kekes)
-            unit.spawn(self.bot)
+            unit.spawn(self.bot, start_code, heading)
             self.kekes[row["keke_id"]] = unit
             started.append(row["keke_id"])
         note = f" (#{', #'.join(str(i) for i in started)} back on the road)" if started \
