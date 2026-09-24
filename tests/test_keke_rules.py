@@ -21,7 +21,7 @@ from cogs import keke as cog
 # Help Desk, Hospital Lobby, School Building, Broadcasting Station,
 # Market District, Automotive District, Transport District, Commercial District
 EXPECTED_SPINE = [
-    "administrative-office",
+    "administrative-block",
     "bed-sitter",
     "line-houses",
     "immigration-office",
@@ -190,7 +190,7 @@ def test_effective_destination_nonexempt_stays_on_parent():
     # !keke university -> Administrative Office (stop, north end)
     cat, loc, parent, hub_dropoff = cog._effective_destination("university")
     assert hub_dropoff is False
-    assert loc == "administrative-office"
+    assert loc == "administrative-block"
     assert parent == "Administrative Office"
 
 
@@ -200,10 +200,10 @@ def test_effective_destination_unknown_word():
 
 def test_hub_fares():
     # Fare to a hub = fare for the km from boarding to the hub stop;
-    # e.g. a CA keke boarding at administrative-office to the south hub
+    # e.g. a CA keke boarding at administrative-block to the south hub
     # (transport-district, index 15) travels 15 segments = 28.125 km ->
     # ceil 29 -> ₦2900 under the whole-km rounding rule.
-    segments = kc.STOP_INDEX["transport-district"] - kc.STOP_INDEX["administrative-office"]
+    segments = kc.STOP_INDEX["transport-district"] - kc.STOP_INDEX["administrative-block"]
     km = segments * kc.KM_PER_SEGMENT
     assert km == 28.125
     assert kc.fare_for(km) == max(kc.MIN_FARE, math.ceil(km) * kc.FARE_PER_KM) == 2900
