@@ -11,9 +11,10 @@ Engine
 ------
 The bot drives every purchased keke in a continuous to-and-fro loop over its
 route's ACTUAL stops (17-stop spine, exempt channels jumped over). At each
-stop the keke posts an ARRIVAL block, waits STOP_SECONDS for boarding, then
-burns the segment's fuel, posts a DEPARTURE block (both self-delete after
-BLOCK_LIFETIME_SECONDS) and drives MOVE_SECONDS to the next stop. Route ends are turnarounds (direction flips).
+stop the keke posts an ARRIVAL block, deletes it after ARRIVAL_BLOCK_SECONDS and
+replaces it with a "departing in N secs..." block (edited live every
+NOTICE_REFRESH_SECONDS) that stays until the STOP_SECONDS dwell is over, then burns the segment's fuel and drives
+MOVE_SECONDS to the next stop. Route ends are turnarounds (direction flips).
 
 Fares are checked against the player's cash at hand at BOARD time and
 deducted (plus state treasury credit) at DROP-OFF (Q3). Exception drop-off:
@@ -23,6 +24,7 @@ keke's current stop and told to trek the rest (message 5).
 
 import asyncio
 import logging
+import math
 from collections import defaultdict
 
 import discord
@@ -58,10 +60,13 @@ MSG_WRONG_ROUTE_SINGLE = "I nor dy go that area oga/madam 🛺💨"
 MSG_GATE_PASS = "Not accessible❗You need gate pass 🪪"
 MSG_INVALID_DEST = "invalid destination ❌"
 
-# Two separate blocks (message 3): ARRIVAL is posted when the keke pulls into a
-# stop, DEPARTURE when it leaves. Each one deletes itself after
-# BLOCK_LIFETIME_SECONDS.
-BLOCK_LIFETIME_SECONDS = 55
+# Two blocks per stop (message 3). ARRIVAL is posted when the keke pulls in and
+# is deleted after ARRIVAL_BLOCK_SECONDS; it is immediately replaced by a
+# "DEPARTING IN N SECS..." block that stays for the rest of the STOP_SECONDS
+# dwell and is deleted when the keke leaves.
+ARRIVAL_BLOCK_SECONDS = 5
+# The departing block is edited every NOTICE_REFRESH_SECONDS to show the time left.
+NOTICE_REFRESH_SECONDS = 15
 
 STOP_BLOCK = """━━━━━━━━━━━━━━━━━━━━
 🛺 KEKE {title}
@@ -162,6 +167,8 @@ class KekeUnit:
         #                                       destination, fare, hub_dropoff}
         self.task = None
         self._loop_stop = asyncio.Event()
+        self._notice = None      # the live "departing in" message, if any
+        self._depart_at = 0.0
 
     @property
     def direction(self):
@@ -220,25 +227,74 @@ class KekeUnit:
         for p in [p for p in self.passengers if p["location_code"] == self.stop_code]:
             self.passengers.remove(p)
             await self._drop_passenger(p, channel, paid=True)
-        # Arrival block now; the departure block is posted in _tick_move when
-        # the keke actually leaves, after the STOP_SECONDS dwell.
-        await self._post_block("ARRIVAL", "Arrived")
-        await self._sleep(kc.STOP_SECONDS)
+        arrival_secs = min(ARRIVAL_BLOCK_SECONDS, kc.STOP_SECONDS)
+        wait_secs = kc.STOP_SECONDS - arrival_secs
+        # 1) ARRIVAL block, then delete it and switch to the departing block.
+        arrival_msg = await self._send_block("ARRIVAL", "Arrived")
+        try:
+            await self._sleep(arrival_secs)
+        finally:
+            await self._delete_msg(arrival_msg)
+        if wait_secs <= 0:
+            return
+        # 2) "Departing in N secs..." block for the rest of the dwell; deleted
+        #    when the delay is over (i.e. as the keke leaves).
+        self._depart_at = asyncio.get_running_loop().time() + wait_secs
+        self._notice = await self._send_block(self._departing_title(), "Departing")
+        try:
+            loop = asyncio.get_running_loop()
+            while True:
+                left = self._depart_at - loop.time()
+                if left <= 0:
+                    break
+                await self._sleep(min(NOTICE_REFRESH_SECONDS, left))
+                # Live countdown: edit the block while there is still time left.
+                if self._depart_at - loop.time() > 0.5:
+                    await self.refresh_notice()
+        finally:
+            notice, self._notice = self._notice, None
+            await self._delete_msg(notice)
 
-    async def _post_block(self, title, status):
-        """Post the arrival/departure block at the current stop; it deletes
-        itself after BLOCK_LIFETIME_SECONDS."""
+    def _departing_title(self):
+        left = max(1, math.ceil(self._depart_at - asyncio.get_running_loop().time()))
+        return f"DEPARTING IN {left} SEC{'S' if left != 1 else ''}..."
+
+    async def _send_block(self, title, status):
+        """Post a status block at the current stop; returns the message (or None)."""
         channel = self.channel_map.get(self.stop_code)
         if channel is None:
-            return
+            return None
         next_stop = self._next_stop()
         try:
-            await channel.send(
-                self._status_block(kc.STOP_CODES[next_stop], title, status),
-                delete_after=BLOCK_LIFETIME_SECONDS,
+            return await channel.send(
+                self._status_block(kc.STOP_CODES[next_stop], title, status)
             )
         except discord.HTTPException:
             log.exception("keke %s could not post %s block", self.keke_id, title)
+            return None
+
+    async def _delete_msg(self, message):
+        if message is None:
+            return
+        try:
+            await message.delete()
+        except discord.HTTPException:
+            pass  # already gone
+
+    async def refresh_notice(self):
+        """Re-render the "departing in" block (passenger list + time left). Runs
+        only on the NOTICE_REFRESH_SECONDS cadence; boarding does not trigger it
+        (the "sitdown well" reply is what tells a player they are seated)."""
+        message = self._notice
+        if message is None:
+            return
+        try:
+            next_stop = self._next_stop()
+            await message.edit(content=self._status_block(
+                kc.STOP_CODES[next_stop], self._departing_title(), "Departing"
+            ))
+        except discord.HTTPException:
+            pass
 
     def _status_block(self, next_stop_code, title="ARRIVAL", status="Arrived"):
         pax = "\n".join(f"<@{p['member_id']}>" for p in self.passengers) or "—"
@@ -289,8 +345,6 @@ class KekeUnit:
             await self._emergency_dropoff(str(exc))
             self._loop_stop.set()
             return
-        # Fuel is fine, so the keke really is leaving: post the departure block.
-        await self._post_block("DEPARTURE", "Departing")
         await self._sleep(kc.MOVE_SECONDS)
         self._stop = next_stop
 
