@@ -726,6 +726,20 @@ async def upsert_residence_permit(player_id, permit_number, full_name, nin, resi
         )
 
 
+async def get_residence_permits_by_state(state: str):
+    """Every permit for a state, newest first, with each player's discord_id for mentioning."""
+    async with get_pool().acquire() as conn:
+        return await conn.fetch(
+            """
+            SELECT c.*, p.discord_id
+            FROM residence_permits c JOIN players p ON p.player_id = c.player_id
+            WHERE c.issue_state = $1
+            ORDER BY c.date_of_issuance DESC, c.full_name;
+            """,
+            state,
+        )
+
+
 async def get_residence_permit_by_player(player_id: int):
     async with get_pool().acquire() as conn:
         return await conn.fetchrow("SELECT * FROM residence_permits WHERE player_id = $1;", player_id)

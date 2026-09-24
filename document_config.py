@@ -89,19 +89,68 @@ NIN_CARD_TEXT = {
 PERMIT_CARD_DELAY_MINUTES = int(os.environ.get("PERMIT_CARD_DELAY_MINUTES", "20"))
 PERMIT_EXPIRY_DAYS = int(os.environ.get("PERMIT_EXPIRY_DAYS", "14"))
 
-# Residential location code -> (parent category key from locations.py, label printed in the card's
-# "RESIDENCE / APARTMENT" field). !permit only grants the "State Resident" role; it does not grant
-# any of the specific housing roles (Miniflat Resident etc.) — those are handled elsewhere.
+# Residential location code -> (category key, card label). Governor/President tier use a
+# per-holder label instead (see GOVERNMENT_RESIDENCES below), so they aren't listed here.
 HOUSE_TYPES = {
-    "line-houses":         ("low_cost_housing",      "Line Houses"),
-    "bed-sitter":          ("low_cost_housing",      "Bed-Sitter"),
+    "line-houses":         ("low_cost_housing",       "Line Houses"),
+    "bed-sitter":          ("low_cost_housing",       "Bed-Sitter"),
     "mini-flat":           ("mid_class_residential",  "Mini Flat"),
     "two-bedroom-flat":    ("mid_class_residential",  "Two Bedroom Flat"),
     "three-bedroom-flat":  ("mid_class_residential",  "Three Bedroom Flat"),
     "private-estate":      ("high_class_residential", "Private Estate"),
     "luxury-duplex":       ("high_class_residential", "Luxury Duplex"),
     "penthouse":           ("high_class_residential", "Penthouse"),
+    "governor-penthouse":  ("high_class_residential", None),   # label depends on who holds it
+    "president-villa":     ("high_class_residential", None),
 }
+
+# Role a player must ALREADY hold before Immigration will issue a permit for that house type.
+# This is a prerequisite check only — it doesn't grant the role, and it has no effect on the
+# existing channel-access rules in locations.py / location_permissions.py.
+# "{S}" is replaced with the player's current state (e.g. "Delta").
+HOUSE_PREREQUISITE_ROLES = {
+    "line-houses":        ["Line Houses Resident"],
+    "bed-sitter":         ["Bed Sitter Resident"],
+    "mini-flat":          ["Miniflat Resident"],
+    "two-bedroom-flat":   ["Two Bedroom Flat Resident"],
+    "three-bedroom-flat": ["Three Bedroom Flat Resident"],
+    "private-estate":     ["Private Estate Resident"],
+    "luxury-duplex":      ["Luxury Duplex Resident"],
+    "penthouse":          ["Penthouse Resident"],
+    # governor-penthouse / president-villa have their own two-role check — see GOVERNMENT_RESIDENCES.
+}
+
+# Role !permit grants on success, for every code in HOUSE_TYPES except governor-penthouse and
+# president-villa (those grant nothing new — see GOVERNMENT_RESIDENCES).
+HOUSE_GRANTS_STATE_RESIDENT = {
+    "line-houses", "bed-sitter", "mini-flat", "two-bedroom-flat", "three-bedroom-flat",
+    "private-estate", "luxury-duplex", "penthouse",
+}
+
+# governor-penthouse / president-villa: two roles are checked together (the literal "State
+# Resident" or "Federal Resident" role, plus one of two holder-specific roles), and the card label
+# and the granted role depend on WHICH of the two holder roles the player has.
+# Each entry: shared_role, {holder_role (with "{S}" for the player's state): (card_label, role_granted_or_None)}
+GOVERNMENT_RESIDENCES = {
+    "governor-penthouse": {
+        "shared_role": "State Resident",
+        "holders": {
+            "{S} Governor":         ("Governor Penthouse", "{S} Resident"),
+            "{S} Deputy Governor":  ("Deputy Governor Residence", "{S} Resident"),
+        },
+        "address": "Government House, {S}",
+    },
+    "president-villa": {
+        "shared_role": "Federal Resident",
+        "holders": {
+            "President":       ("President Villa", "Abuja Resident"),
+            "Vice President":  ("Vice President Residence", "Abuja Resident"),
+        },
+        "address": "Aso Rock Presidential Villa, Abuja",
+        "state_only": "Abuja",
+    },
+}
+
 # Category key -> label printed after the address (matches locations.py's category display names).
 HOUSE_CATEGORY_LABELS = {
     "low_cost_housing": "Low-Cost Housing",
@@ -109,13 +158,13 @@ HOUSE_CATEGORY_LABELS = {
     "high_class_residential": "High-Class Residential",
 }
 # Category key -> street/estate names used to build the address, e.g. "No 3, First Pipeline".
-# Add as many as you like; a random one is picked per registration.
+# Add as many as you like; a random one is picked per registration. (Not used by the two
+# government residences above — they use a fixed official address instead.)
 HOUSE_STREET_NAMES = {
     "low_cost_housing": ["First Pipeline", "Second Pipeline", "Third Pipeline", "Unity Close", "Peace Avenue"],
     "mid_class_residential": ["Freedom Way", "Garden Estate Road", "Palm Grove Street", "Harmony Crescent"],
     "high_class_residential": ["Ocean View Drive", "Victoria Crescent", "Royal Palm Avenue", "Emerald Hills Road"],
 }
-STATE_RESIDENT_ROLE = "State Resident"     # the only role !permit grants
 
 # Text printed in each state's permit banner and used for the LGA field placeholder.
 STATE_BANNER = {
