@@ -101,6 +101,18 @@ async def init_tables():
         )
         await conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS oil_drill_jobs (
+                job_id        SERIAL PRIMARY KEY,
+                state         TEXT NOT NULL,
+                barrels       NUMERIC(10, 3) NOT NULL CHECK (barrels > 0),
+                started_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                due_at        TIMESTAMPTZ NOT NULL,
+                completed_at  TIMESTAMPTZ
+            );
+            """
+        )
+        await conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS oil_interstate_requests (
                 request_id        SERIAL PRIMARY KEY,
                 requesting_state  TEXT NOT NULL,
@@ -331,14 +343,19 @@ async def get_stock(state):
 
 
 # ---------------------------------------------------------------------------
-# Drilling — per-use, not automatic. Debits treasury for equipment cost.
+# Drilling — NOT instant. Starts a job that takes DRILL_DURATION_SECONDS
+# (test: 5 min) to complete; a tick resolves it via complete_drill_job()
+# once due_at has passed, same shape as refining. Only one drill job can be
+# active per state at a time (that's what replaces the old cooldown).
 # ---------------------------------------------------------------------------
 
 async def drill_crude(state, driller_id):
     """
-    +DRILL_YIELD_BARRELS at the well (capped), debiting DRILL_COST from the
-    treasury. Raises if the cooldown hasn't elapsed or the well is full.
-    Returns {"barrels_added", "new_well_barrels", "new_treasury_balance", "ref"}.
+    Starts a drilling job: debits DRILL_COST from the treasury immediately,
+    and DRILL_YIELD_BARRELS lands in the well (capped) only once the job's
+    due_at has passed and a tick calls complete_drill_job(). Raises if a
+    drill job is already in progress for this state, or the well is full.
+    Returns {"job_id", "due_at", "new_treasury_balance", "ref"}.
     """
     async with database.get_pool().acquire() as conn:
         async with conn.transaction():
@@ -346,20 +363,15 @@ async def drill_crude(state, driller_id):
             stock = await conn.fetchrow(
                 "SELECT * FROM oil_state_stock WHERE state = $1 FOR UPDATE;", state
             )
-            # Cooldown check done in SQL, against the DB's own clock:
-            cooldown_row = await conn.fetchrow(
-                "SELECT (last_drill_at + $2 * INTERVAL '1 second') AS ready_at "
-                "FROM oil_state_stock WHERE state = $1;",
-                state, oc.DRILL_COOLDOWN_SECONDS,
-            )
-            ready_at = cooldown_row["ready_at"] if cooldown_row else None
-            if ready_at is not None:
-                still_waiting = await conn.fetchval("SELECT $1::timestamptz > NOW();", ready_at)
-                if still_waiting:
-                    raise BankError(f"The well is still cooling down — try again shortly.")
-
             if stock["well_barrels"] >= oc.WELL_STOCKPILE_CAP:
                 raise BankError(f"The well is already full ({oc.WELL_STOCKPILE_CAP} barrels) — load a trailer first.")
+
+            active = await conn.fetchval(
+                "SELECT 1 FROM oil_drill_jobs WHERE state = $1 AND completed_at IS NULL LIMIT 1;",
+                state,
+            )
+            if active:
+                raise BankError("The well is already drilling — wait for it to finish.")
 
             treasury = await bank._system_account(conn, state, bank._TREASURY)
             if treasury["balance"] < oc.DRILL_COST:
@@ -367,9 +379,6 @@ async def drill_crude(state, driller_id):
                     f"The {state} Treasury only has {cfg.money(treasury['balance'])} — "
                     f"drilling needs {cfg.money(oc.DRILL_COST)}."
                 )
-
-            added = min(oc.DRILL_YIELD_BARRELS, oc.WELL_STOCKPILE_CAP - stock["well_barrels"])
-            new_well_barrels = stock["well_barrels"] + added
 
             new_treasury_balance = treasury["balance"] - oc.DRILL_COST
             await conn.execute(
@@ -381,16 +390,61 @@ async def drill_crude(state, driller_id):
                                        oc.DRILL_COST, cfg.to_money(0), cfg.to_money(0),
                                        "Drilling equipment cost", state)
 
-            await conn.execute(
-                "UPDATE oil_state_stock SET well_barrels = $1, last_drill_at = NOW() WHERE state = $2;",
-                new_well_barrels, state,
+            job = await conn.fetchrow(
+                """
+                INSERT INTO oil_drill_jobs (state, barrels, due_at)
+                VALUES ($1, $2, NOW() + $3 * INTERVAL '1 second')
+                RETURNING job_id, due_at;
+                """,
+                state, oc.DRILL_YIELD_BARRELS, oc.DRILL_DURATION_SECONDS,
             )
             return {
-                "barrels_added": added,
-                "new_well_barrels": new_well_barrels,
+                "job_id": job["job_id"],
+                "due_at": job["due_at"],
                 "new_treasury_balance": new_treasury_balance,
                 "ref": tx["ref"],
             }
+
+
+async def get_due_drill_jobs(limit=10):
+    async with database.get_pool().acquire() as conn:
+        return await conn.fetch(
+            "SELECT * FROM oil_drill_jobs WHERE completed_at IS NULL AND due_at <= NOW() "
+            "ORDER BY due_at LIMIT $1;",
+            limit,
+        )
+
+
+async def complete_drill_job(job_id):
+    """
+    Land a due drilling job's barrels in the well, capped at
+    WELL_STOCKPILE_CAP (excess is lost — cost was already paid at start).
+    Returns {"barrels_added", "new_well_barrels"} or None if already completed.
+    """
+    async with database.get_pool().acquire() as conn:
+        async with conn.transaction():
+            job = await conn.fetchrow(
+                "SELECT * FROM oil_drill_jobs WHERE job_id = $1 AND completed_at IS NULL FOR UPDATE;",
+                job_id,
+            )
+            if job is None:
+                return None
+
+            stock = await conn.fetchrow(
+                "SELECT * FROM oil_state_stock WHERE state = $1 FOR UPDATE;", job["state"]
+            )
+            added = min(float(job["barrels"]), oc.WELL_STOCKPILE_CAP - float(stock["well_barrels"]))
+            added = max(added, 0)
+            new_well_barrels = float(stock["well_barrels"]) + added
+
+            await conn.execute(
+                "UPDATE oil_state_stock SET well_barrels = $1 WHERE state = $2;",
+                new_well_barrels, job["state"],
+            )
+            await conn.execute(
+                "UPDATE oil_drill_jobs SET completed_at = NOW() WHERE job_id = $1;", job_id
+            )
+            return {"barrels_added": added, "new_well_barrels": new_well_barrels}
 
 
 # ---------------------------------------------------------------------------
