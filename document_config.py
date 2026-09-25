@@ -31,6 +31,7 @@ BASE_DIR = Path(__file__).resolve().parent
 ASSETS_DIR = BASE_DIR / "assets"
 FONTS_DIR = ASSETS_DIR / "fonts"
 TEMPLATES_DIR = ASSETS_DIR / "templates"
+STAMPS_DIR = ASSETS_DIR / "stamps"
 
 FONTS = {
     "bold": FONTS_DIR / "WorkSans-Bold.ttf",
@@ -182,6 +183,13 @@ STATE_BANNER_COLORS = {
 }
 # Which template a state's permit uses (keys into DOCUMENTS below).
 STATE_PERMIT_DOC = {"Delta": "permit_delta", "Lagos": "permit_lagos", "Abuja": "permit_abuja"}
+# The pre-made circular stamp artwork per state (blue/gold/green), with a blank "DATE ___" line
+# that the date gets stamped onto at render time — see make_date_stamp_image.
+STATE_STAMP_FILES = {
+    "Delta": STAMPS_DIR / "naijaverse_stamp_delta.png",
+    "Lagos": STAMPS_DIR / "naijaverse_stamp_lagos.png",
+    "Abuja": STAMPS_DIR / "naijaverse_stamp_abuja.png",
+}
 
 # All three templates share one layout, just a different colour skin, so one set of coordinates
 # and one set of text styles covers all of them. Measured by pixel-scanning the cropped card
@@ -199,7 +207,7 @@ PERMIT_CARD_FIELDS = {
     "lga":                  (537, 806, 874, 863),
     "date_of_issuance":     (921, 809, 1233, 855),
     "expiry_date":          (1283, 810, 1586, 854),
-    "issuing_authority":    (70, 898, 178, 998),
+    "issuing_authority":    (40, 858, 520, 1135),
     "signature":            (735, 955, 1175, 1028),
     "qr_code":              (1439, 944, 1591, 1094),
 }
@@ -216,12 +224,12 @@ PERMIT_CARD_TEXT = {
     "lga":               dict(font="bold", max_size=26, min_size=12, color=PERMIT_INK, align="left", pad_x=14, upper=True),
     "date_of_issuance":  dict(font="bold", max_size=24, min_size=12, color=PERMIT_INK, align="left", pad_x=14, upper=True),
     "expiry_date":       dict(font="bold", max_size=24, min_size=12, color=PERMIT_INK, align="left", pad_x=14, upper=True),
-    "issuing_authority": dict(color="#8B1E1E", angle=-9),   # drawn as a stamp, not text — see image_fields below
+    "issuing_authority": dict(angle=-8, date_pos=(0.40, 0.724), date_size_frac=0.052),   # image + date stamp — see image_fields below
     "signature":         dict(font="signature", max_size=56, min_size=20, color="#1B2A5E", align="left", pad_x=10, upper=False, vcenter="ink"),
 }
 
 
-def _permit_entry(template_file, banner_color):
+def _permit_entry(template_file, banner_color, stamp_file):
     text_styles = dict(PERMIT_CARD_TEXT)
     text_styles["state_banner"] = {**PERMIT_CARD_TEXT["state_banner"], "color": banner_color}
     text_styles["issuing_authority"] = {**PERMIT_CARD_TEXT["issuing_authority"], "color": banner_color}
@@ -233,7 +241,8 @@ def _permit_entry(template_file, banner_color):
         "corner_radius": None,
         "fields": PERMIT_CARD_FIELDS,
         "text_styles": text_styles,
-        "image_fields": {"portrait": "portrait", "qr_code": "qr", "issuing_authority": "stamp"},
+        "image_fields": {"portrait": "portrait", "qr_code": "qr", "issuing_authority": "date_stamp"},
+        "stamp_assets": {"issuing_authority": stamp_file},
         "portrait_corner_radius": 10,
         "portrait_centering": (0.5, 0.30),
         "qr_dark": PERMIT_INK,
@@ -258,7 +267,7 @@ DOCUMENTS = {
         "portrait_centering": (0.5, 0.30),   # crop focus: 0.30 = biased towards the top, keeps faces
         "qr_dark": "#0E1F16",
     },
-    "permit_delta": _permit_entry("naijaverse_permit_delta.jpg", STATE_BANNER_COLORS["Delta"]),
-    "permit_abuja": _permit_entry("naijaverse_permit_abuja.jpg", STATE_BANNER_COLORS["Abuja"]),
-    "permit_lagos": _permit_entry("naijaverse_permit_lagos.jpg", STATE_BANNER_COLORS["Lagos"]),
+    "permit_delta": _permit_entry("naijaverse_permit_delta.jpg", STATE_BANNER_COLORS["Delta"], STATE_STAMP_FILES["Delta"]),
+    "permit_abuja": _permit_entry("naijaverse_permit_abuja.jpg", STATE_BANNER_COLORS["Abuja"], STATE_STAMP_FILES["Abuja"]),
+    "permit_lagos": _permit_entry("naijaverse_permit_lagos.jpg", STATE_BANNER_COLORS["Lagos"], STATE_STAMP_FILES["Lagos"]),
 }

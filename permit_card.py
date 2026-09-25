@@ -103,8 +103,7 @@ def card_values(data):
         "lga": data["lga"],
         "date_of_issuance": format_date(data["date_of_issuance"]),
         "expiry_date": format_date(data["expiry_date"]),
-        "issuing_authority": [f"{data['issue_state'].upper()} IMMIGRATION OFFICE",
-                              f"ISSUED {format_date(data['date_of_issuance'])}"],
+        "issuing_authority": format_date(data["date_of_issuance"]),
         "signature": data["full_name"],
     }
 

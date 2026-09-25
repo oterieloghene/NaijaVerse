@@ -274,6 +274,37 @@ def _portrait_image(data, size, centering):
 # QR code
 # ---------------------------------------------------------------------------
 
+def make_date_stamp_image(asset_path, date_text, size, date_color, angle=-8,
+                          date_pos=(0.40, 0.724), date_size_frac=0.052):
+    """
+    Take the pre-made circular stamp artwork at `asset_path` (transparent PNG), stamp `date_text`
+    onto its blank date line, size it to fit `size` (keeping it circular — never stretched), rotate
+    it a few degrees like a hand-stamped mark, and return an RGBA image sized to fit `size` without
+    spilling outside its box. `date_pos` is the date line's position as a fraction of the artwork's
+    own width/height (left edge of the text, vertically centred on the line); tune it here if the
+    stamp artwork changes. `date_size_frac` is the date's font size as a fraction of the stamp's
+    diameter.
+    """
+    with Image.open(asset_path) as src:
+        art = src.convert("RGBA")
+
+    diameter = min(size)   # keep the artwork circular — sized to whichever dimension is tighter
+    art = art.resize((diameter, diameter), Image.LANCZOS)
+
+    if date_text:
+        d = ImageDraw.Draw(art)
+        font_size = max(10, int(diameter * date_size_frac))
+        font = _font(cfg.FONTS["bold"], font_size)
+        x, y = date_pos[0] * diameter, date_pos[1] * diameter
+        d.text((x, y), date_text.upper(), font=font, fill=ImageColor.getrgb(date_color), anchor="lm")
+
+    rotated = art.rotate(angle, expand=True, resample=Image.BICUBIC)
+    rotated.thumbnail(size, Image.LANCZOS)
+    out = Image.new("RGBA", size, (0, 0, 0, 0))
+    out.alpha_composite(rotated, ((size[0] - rotated.width) // 2, (size[1] - rotated.height) // 2))
+    return out
+
+
 def make_qr_image(data, size, dark="#000000", light="#FFFFFF", quiet_modules=2):
     """
     Square QR image, exactly `size` px, with whole-pixel modules (crisp, no blurring) centred in
@@ -407,6 +438,18 @@ def render_document(doc_type, values, portrait_bytes=None, qr_data=None):
                 stamp = make_stamp_image(lines, size, color=stamp_style.get("color", "#8B1E1E"),
                                          angle=stamp_style.get("angle", -9))
                 canvas.paste(stamp, (left, top), stamp)
+        elif kind == "date_stamp":
+            stamp_style = spec["text_styles"].get(name, {})
+            asset_path = spec["stamp_assets"][name]
+            date_text = values.get(name, "")
+            stamp = make_date_stamp_image(
+                asset_path, date_text, size,
+                date_color=stamp_style.get("color", "#000000"),
+                angle=stamp_style.get("angle", -8),
+                date_pos=stamp_style.get("date_pos", (0.40, 0.724)),
+                date_size_frac=stamp_style.get("date_size_frac", 0.052),
+            )
+            canvas.paste(stamp, (left, top), stamp)
         elif name in values and values[name] not in (None, ""):
             _draw_text_field(draw, values[name], box, spec["text_styles"][name])
 
