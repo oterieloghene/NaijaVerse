@@ -35,6 +35,7 @@ TEMPLATES_DIR = ASSETS_DIR / "templates"
 FONTS = {
     "bold": FONTS_DIR / "WorkSans-Bold.ttf",
     "signature": FONTS_DIR / "NothingYouCouldDo-Regular.ttf",
+    "display": FONTS_DIR / "Gloock-Regular.ttf",   # bold serif for prominent headings (state banner)
 }
 
 NIN_CARD_DELAY_MINUTES = int(os.environ.get("NIN_CARD_DELAY_MINUTES", "20"))
@@ -198,7 +199,7 @@ PERMIT_CARD_FIELDS = {
 
 PERMIT_INK = "#17233B"
 PERMIT_CARD_TEXT = {
-    "state_banner":      dict(font="bold", max_size=40, min_size=18, color="#1B2A5E", align="center", pad_x=10, upper=True, vcenter="caps"),
+    "state_banner":      dict(font="display", max_size=68, min_size=30, color="#8B1E1E", align="center", pad_x=10, upper=True, vcenter="caps"),
     "full_name":         dict(font="bold", max_size=32, min_size=14, color=PERMIT_INK, align="left", pad_x=16, upper=True),
     "permit_number":     dict(font="bold", max_size=26, min_size=12, color=PERMIT_INK, align="left", pad_x=14, upper=True),
     "nin":               dict(font="bold", max_size=26, min_size=12, color=PERMIT_INK, align="left", pad_x=14, upper=True),
@@ -208,7 +209,7 @@ PERMIT_CARD_TEXT = {
     "lga":               dict(font="bold", max_size=26, min_size=12, color=PERMIT_INK, align="left", pad_x=14, upper=True),
     "date_of_issuance":  dict(font="bold", max_size=24, min_size=12, color=PERMIT_INK, align="left", pad_x=14, upper=True),
     "expiry_date":       dict(font="bold", max_size=24, min_size=12, color=PERMIT_INK, align="left", pad_x=14, upper=True),
-    "issuing_authority": dict(font="bold", max_size=22, min_size=11, color=PERMIT_INK, align="left", pad_x=4, upper=False),
+    "issuing_authority": dict(color="#8B1E1E", angle=-9),   # drawn as a stamp, not text — see image_fields below
     "signature":         dict(font="signature", max_size=56, min_size=20, color="#1B2A5E", align="left", pad_x=10, upper=False, vcenter="ink"),
 }
 
@@ -222,7 +223,7 @@ def _permit_entry(template_file):
         "corner_radius": None,
         "fields": PERMIT_CARD_FIELDS,
         "text_styles": PERMIT_CARD_TEXT,
-        "image_fields": {"portrait": "portrait", "qr_code": "qr"},
+        "image_fields": {"portrait": "portrait", "qr_code": "qr", "issuing_authority": "stamp"},
         "portrait_corner_radius": 10,
         "portrait_centering": (0.5, 0.30),
         "qr_dark": PERMIT_INK,

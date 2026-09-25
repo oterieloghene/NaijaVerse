@@ -13,9 +13,10 @@ read, never written.
 
 import io
 import logging
+import random
 import statistics
 
-from PIL import Image, ImageChops, ImageDraw, ImageFont, ImageOps
+from PIL import Image, ImageChops, ImageColor, ImageDraw, ImageFont, ImageOps
 
 import document_config as cfg
 
@@ -301,8 +302,62 @@ def make_qr_image(data, size, dark="#000000", light="#FFFFFF", quiet_modules=2):
 
 
 # ---------------------------------------------------------------------------
-# Putting it together
+# Ink stamp (e.g. an issuing office's stamp, with a date)
 # ---------------------------------------------------------------------------
+
+def make_stamp_image(lines, size, color="#8B1E1E", angle=-9, border=3, corner_radius=10):
+    """
+    A worn double-border "ink stamp" rectangle with the given lines of bold uppercase text,
+    rotated a few degrees like a hand-stamped mark. `lines` is a list of strings, e.g.
+    ["DELTA IMMIGRATION OFFICE", "ISSUED 22 SEP 2026"]. Returns an RGBA image sized to fit `size`
+    once rotated (so it can be pasted straight onto the card without spilling outside its box).
+    """
+    scale = 3
+    w, h = size
+    # draw oversized and un-rotated first, so the border and text stay crisp after rotation/shrink
+    draw_w, draw_h = w * scale, h * scale
+    stamp = Image.new("RGBA", (draw_w, draw_h), (0, 0, 0, 0))
+    d = ImageDraw.Draw(stamp)
+    ink = ImageColor.getrgb(color)
+    pad = 6 * scale
+    d.rounded_rectangle((pad, pad, draw_w - pad, draw_h - pad),
+                        radius=corner_radius * scale, outline=ink, width=border * scale)
+    inset = pad + 6 * scale
+    d.rounded_rectangle((inset, inset, draw_w - inset, draw_h - inset),
+                        radius=max(2, corner_radius * scale - 6 * scale), outline=ink, width=max(1, border * scale // 2))
+
+    usable_h = draw_h - 2 * inset - 4 * scale
+    line_h = usable_h / max(len(lines), 1)
+    size_px = max(10, int(line_h * 0.62))
+    font = _font(cfg.FONTS["bold"], size_px)
+    for i, line in enumerate(lines):
+        text = line.upper()
+        while font.getlength(text) > (draw_w - 2 * inset - 8 * scale) and size_px > 8:
+            size_px -= 2
+            font = _font(cfg.FONTS["bold"], size_px)
+        cy = inset + 2 * scale + line_h * (i + 0.5)
+        d.text((draw_w / 2, cy), text, font=font, fill=ink, anchor="mm")
+
+    # a light noisy/worn look: knock out a faint random speckle so it doesn't look computer-perfect
+    speckle = Image.new("L", stamp.size, 0)
+    ds = ImageDraw.Draw(speckle)
+    rng = random.Random(sum(map(ord, "".join(lines))))
+    for _ in range(int(draw_w * draw_h * 0.0006)):
+        x, y = rng.randint(0, draw_w - 1), rng.randint(0, draw_h - 1)
+        ds.ellipse((x, y, x + scale, y + scale), fill=rng.randint(60, 160))
+    alpha = stamp.split()[3]
+    alpha = ImageChops.subtract(alpha, speckle)
+    stamp.putalpha(alpha)
+
+    rotated = stamp.rotate(angle, expand=True, resample=Image.BICUBIC)
+    rotated.thumbnail((w, h), Image.LANCZOS)
+    # centre the (now smaller, due to rotation padding) stamp inside the exact requested size
+    out = Image.new("RGBA", size, (0, 0, 0, 0))
+    out.alpha_composite(rotated, ((w - rotated.width) // 2, (h - rotated.height) // 2))
+    return out
+
+
+
 
 def render_document(doc_type, values, portrait_bytes=None, qr_data=None):
     """
@@ -329,6 +384,13 @@ def render_document(doc_type, values, portrait_bytes=None, qr_data=None):
                 side = min(size)
                 qr = make_qr_image(qr_data, side, dark=spec.get("qr_dark", "#000000"))
                 canvas.paste(qr, (left + (size[0] - side) // 2, top + (size[1] - side) // 2))
+        elif kind == "stamp":
+            lines = values.get(name)
+            if lines:
+                stamp_style = spec["text_styles"].get(name, {})
+                stamp = make_stamp_image(lines, size, color=stamp_style.get("color", "#8B1E1E"),
+                                         angle=stamp_style.get("angle", -9))
+                canvas.paste(stamp, (left, top), stamp)
         elif name in values and values[name] not in (None, ""):
             _draw_text_field(draw, values[name], box, spec["text_styles"][name])
 

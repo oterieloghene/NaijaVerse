@@ -153,3 +153,9 @@ def find_arrival_terminal(text_channels, state):
 def is_front_desk(channel_name):
     """True for the front-desk channel (an emoji/decoration prefix is fine)."""
     return "front-desk" in channel_name.casefold()
+
+
+def is_immigration_office(channel_name):
+    """True for the immigration-office channel itself (not its front-desk sub-channel)."""
+    name = channel_name.casefold()
+    return "immigration-office" in name and "front-desk" not in name
