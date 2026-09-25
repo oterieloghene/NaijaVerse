@@ -50,16 +50,29 @@ class Oil(commands.Cog):
         self.bot = bot
         self.trips = {}  # vehicle_id -> OilTrip, only while in transit
         self._stop_channels = {}
-        self._refresh_channels()
+        self._refresh_channels()  # best-effort; guilds are usually empty here
         self._refine_ticker.start()
+        self._drill_ticker.start()
 
     async def cog_load(self):
         await odb.init_tables()
 
     def cog_unload(self):
         self._refine_ticker.cancel()
+        self._drill_ticker.cancel()
         for trip in list(self.trips.values()):
             trip.cancel()
+
+    async def cog_before_invoke(self, ctx):
+        # __init__ runs before the bot has connected, so self.bot.guilds is
+        # empty at that point and _stop_channels stays empty forever unless
+        # something refreshes it later. Do that here, before every command —
+        # same defensive pattern keke.py uses.
+        self._refresh_channels()
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        self._refresh_channels()
 
     # ------------------------------------------------------------------
     # channel / role helpers
@@ -74,6 +87,13 @@ class Oil(commands.Cog):
         missing = [c for c in oc.OIL_STOP_CODES if c not in self._stop_channels]
         if missing:
             log.warning("oil: missing channels for stops %s", missing)
+
+    def _message_channel(self, stop_code):
+        """The channel a stop's messages actually post to — the sub-location
+        override (nnpc-fuel-station / refinery) if one exists for this stop,
+        else the stop's own channel."""
+        post_code = oc.MESSAGE_STOP_OVERRIDE.get(stop_code, stop_code)
+        return self._stop_channels.get(post_code)
 
     def _commerce_channel(self, state):
         """<state>'s ministry-of-commerce channel, searched across every
@@ -120,7 +140,7 @@ class Oil(commands.Cog):
                 result = await odb.complete_refine_job(job["job_id"])
                 if result is None:
                     continue
-                channel = self._stop_channels.get(oc.REFINERY_STOP)
+                channel = self._message_channel(oc.REFINERY_STOP)
                 if channel is not None:
                     await channel.send(
                         f"⚗️ Refining complete — +{result['fuel_added']:.1f} L fuel, "
@@ -131,6 +151,27 @@ class Oil(commands.Cog):
 
     @_refine_ticker.before_loop
     async def _before_refine_ticker(self):
+        await self.bot.wait_until_ready()
+
+    @tasks.loop(seconds=REFINE_JOB_POLL_SECONDS)
+    async def _drill_ticker(self):
+        try:
+            jobs = await odb.get_due_drill_jobs()
+            for job in jobs:
+                result = await odb.complete_drill_job(job["job_id"])
+                if result is None:
+                    continue
+                channel = self._message_channel(oc.OIL_WELL_STOP)
+                if channel is not None:
+                    await channel.send(
+                        f"🛢️ Drilling complete — +{result['barrels_added']:.0f} barrels — "
+                        f"well now at {result['new_well_barrels']:.0f}/{oc.WELL_STOCKPILE_CAP}."
+                    )
+        except Exception:
+            log.exception("oil: drill ticker failed")
+
+    @_drill_ticker.before_loop
+    async def _before_drill_ticker(self):
         await self.bot.wait_until_ready()
 
     # ------------------------------------------------------------------
@@ -166,7 +207,7 @@ class Oil(commands.Cog):
         )
 
     async def _park_new_vehicle(self, vehicle_id, vehicle_type):
-        channel = self._stop_channels.get(oc.NNPC_STOP)
+        channel = self._message_channel(oc.NNPC_STOP)
         if channel is None:
             return
         emoji = "🚛" if vehicle_type == "trailer" else "🛢️"
@@ -189,6 +230,33 @@ class Oil(commands.Cog):
             lines.append(f"**{r['name']}** — {status}, cargo: {cargo}, fuel: {r['fuel_liters']:.0f}L")
         await ctx.send("\n".join(lines))
 
+    @commands.command(name="park")
+    async def park(self, ctx, vehicle: str, stop: str = None):
+        """Recovery command: manually park a vehicle that has no parked
+        record (e.g. bought before the channel map had loaded). Defaults to
+        the NNPC Fuel Station if no stop is given."""
+        if not await self._require_petroleum(ctx):
+            return
+        row = await self._find_vehicle(ctx, vehicle)
+        if row is None:
+            return
+        stop = (stop or oc.NNPC_STOP).lower()
+        if stop not in oc.OIL_STOP_INDEX:
+            await ctx.send(f"Unknown stop `{stop}`.")
+            return
+        channel = self._message_channel(stop)
+        if channel is None:
+            await ctx.send(f"No channel found for `{stop}` — check the channel setup.")
+            return
+        emoji = "🚛" if row["vehicle_type"] == "trailer" else "🛢️"
+        cargo = f"{row['cargo_amount']:.0f} {row['cargo_type']}" if row["cargo_type"] != "none" else "0 none"
+        message = await channel.send(
+            f"━━━━━━━━━━━━━━━━━━━━\n{emoji} {row['vehicle_type'].upper()} PARKED\n"
+            f"Location: {stop.replace('-', ' ').title()}\nCargo: {cargo}\n━━━━━━━━━━━━━━━━━━━━"
+        )
+        await odb.set_parked(row["vehicle_id"], channel.id, message.id, stop)
+        await ctx.send(f"**{row['name']}** parked at {stop.replace('-', ' ').title()}.")
+
     # ------------------------------------------------------------------
     # drilling & refining (Commissioner of Petroleum)
     # ------------------------------------------------------------------
@@ -206,8 +274,7 @@ class Oil(commands.Cog):
             await ctx.send(str(e))
             return
         await ctx.send(
-            f"🛢️ Drilled +{result['barrels_added']:.0f} barrels — "
-            f"well now at {result['new_well_barrels']:.0f}/{oc.WELL_STOCKPILE_CAP}."
+            f"🛢️ Drilling... ready around <t:{int(result['due_at'].timestamp())}:R>."
         )
 
     @commands.command(name="refine")
@@ -316,7 +383,7 @@ class Oil(commands.Cog):
             await odb.set_parked(row["vehicle_id"], parked["channel_id"], parked["message_id"], origin)
             return
 
-        old_channel = self._stop_channels.get(origin)
+        old_channel = self._message_channel(origin)
         if old_channel is not None:
             try:
                 old_message = await old_channel.fetch_message(parked["message_id"])
