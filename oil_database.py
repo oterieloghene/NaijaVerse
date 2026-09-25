@@ -637,8 +637,8 @@ async def offload_crude(vehicle_id, state, qty):
 
             new_cargo = vehicle["cargo_amount"] - qty
             await conn.execute(
-                "UPDATE oil_vehicles SET cargo_amount = $1, "
-                "cargo_type = CASE WHEN $1 = 0 THEN 'none' ELSE cargo_type END "
+                "UPDATE oil_vehicles SET cargo_amount = $1::numeric, "
+                "cargo_type = CASE WHEN $1::numeric = 0 THEN 'none' ELSE cargo_type END "
                 "WHERE vehicle_id = $2;",
                 new_cargo, vehicle_id,
             )
@@ -711,8 +711,8 @@ async def offload_product(vehicle_id, state, qty):
 
             new_cargo = vehicle["cargo_amount"] - qty
             await conn.execute(
-                "UPDATE oil_vehicles SET cargo_amount = $1, "
-                "cargo_type = CASE WHEN $1 = 0 THEN 'none' ELSE cargo_type END "
+                "UPDATE oil_vehicles SET cargo_amount = $1::numeric, "
+                "cargo_type = CASE WHEN $1::numeric = 0 THEN 'none' ELSE cargo_type END "
                 "WHERE vehicle_id = $2;",
                 new_cargo, vehicle_id,
             )
