@@ -350,3 +350,64 @@ async def announce_transaction(bot, guild, result):
             await channel.send(embed=org_receipt_embed(result))
         except Exception as exc:
             print(f"[bank] couldn't post receipt for {result['ref']}: {exc!r}")
+
+
+# ---------------------------------------------------------------------------
+# Treasury-channel receipts (posted to a state's Treasury channel, or Abuja's
+# National Treasury channel when the state is the national marker) — used
+# instead of the transaction-log for CBN disbursements/withdrawals and for
+# state-treasury-funded purchases (keke, trailer, tanker).
+# ---------------------------------------------------------------------------
+
+def _treasury_channel(guild, state):
+    """The Treasury channel for `state`, or Abuja's National Treasury channel when
+    `state` is cfg.NATIONAL_TREASURY_STATE."""
+    if state == cfg.NATIONAL_TREASURY_STATE:
+        return state_location_channels(guild, "Abuja").get("national-treasury")
+    return state_location_channels(guild, state).get("treasury")
+
+
+def treasury_credit_embed(result):
+    """Receipt for the account that RECEIVED funds, posted to its own Treasury channel."""
+    lines = [SEP, f"From: {result['from_label']}", f"Amount: {cfg.money(result['amount'])}"]
+    if result.get("narration"):
+        lines.append(f"Narration: {result['narration']}")
+    if result.get("receiver"):
+        lines.append(f"New balance: {cfg.money(result['receiver']['balance'])}")
+    lines += [SEP, f"Ref {result['ref']} · {_log_time(result['created_at'])}"]
+    return _embed("🟢 TREASURY CREDIT", lines, GREEN)
+
+
+def treasury_debit_embed(result):
+    """Receipt for the account that PAID OUT funds, posted to its own Treasury channel."""
+    lines = [SEP, f"To: {result['to_label']}", f"Amount: {cfg.money(result['amount'])}"]
+    if result.get("narration"):
+        lines.append(f"Narration: {result['narration']}")
+    if result.get("sender"):
+        lines.append(f"New balance: {cfg.money(result['sender']['balance'])}")
+    lines += [SEP, f"Ref {result['ref']} · {_log_time(result['created_at'])}"]
+    return _embed("🔴 TREASURY DEBIT", lines, RED)
+
+
+async def post_treasury_credit(bot, guild, state, result):
+    """Post a credit receipt to `state`'s Treasury channel. Never raises."""
+    try:
+        channel = _treasury_channel(guild, state)
+        if channel is None:
+            print(f"[bank] No Treasury channel found for {state}; credit receipt not posted.")
+            return
+        await channel.send(embed=treasury_credit_embed(result))
+    except Exception as exc:
+        print(f"[bank] couldn't post treasury credit receipt for {state}: {exc!r}")
+
+
+async def post_treasury_debit(bot, guild, state, result):
+    """Post a debit receipt to `state`'s Treasury channel. Never raises."""
+    try:
+        channel = _treasury_channel(guild, state)
+        if channel is None:
+            print(f"[bank] No Treasury channel found for {state}; debit receipt not posted.")
+            return
+        await channel.send(embed=treasury_debit_embed(result))
+    except Exception as exc:
+        print(f"[bank] couldn't post treasury debit receipt for {state}: {exc!r}")

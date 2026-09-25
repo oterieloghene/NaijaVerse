@@ -206,6 +206,10 @@ async def buy_vehicle(state, vehicle_type, buyer_id):
                 "cost": cost,
                 "new_treasury_balance": new_treasury_balance,
                 "ref": tx["ref"],
+                "kind": f"{vehicle_type}_purchase", "amount": cost,
+                "created_at": tx["created_at"], "state": state,
+                "sender": bank._party(treasury, new_treasury_balance), "receiver": None,
+                "from_label": treasury["name"], "to_label": name,
             }
 
 
