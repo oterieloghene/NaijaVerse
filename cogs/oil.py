@@ -26,6 +26,7 @@ import logging
 
 from discord.ext import commands, tasks
 
+import bank_messages as bank_msgs
 import location_permissions as perms
 import locations
 import oil_config as oc
@@ -191,6 +192,7 @@ class Oil(commands.Cog):
         await ctx.send(
             f"🚛 **{result['name']}** purchased for ₦{oc.TRAILER_COST:,} — parked at NNPC Fuel Station."
         )
+        await bank_msgs.post_treasury_debit(self.bot, ctx.guild, STATE, result)
 
     @commands.command(name="buy-tanker")
     async def buy_tanker(self, ctx):
@@ -205,6 +207,7 @@ class Oil(commands.Cog):
         await ctx.send(
             f"🛢️ **{result['name']}** purchased for ₦{oc.TANKER_COST:,} — parked at NNPC Fuel Station."
         )
+        await bank_msgs.post_treasury_debit(self.bot, ctx.guild, STATE, result)
 
     async def _park_new_vehicle(self, vehicle_id, vehicle_type, name, fuel_liters):
         channel = self._message_channel(oc.NNPC_STOP)

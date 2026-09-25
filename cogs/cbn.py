@@ -151,7 +151,10 @@ class CBN(commands.Cog):
             await ctx.send(err.message)
             return
         await ctx.send(embed=msgs.cb_with_embed(ctx.author.mention, result), allowed_mentions=NO_PINGS)
-        await bank_msgs.announce_transaction(self.bot, ctx.guild, result)
+        if target == cfg.NATIONAL_TREASURY_STATE:
+            await bank_msgs.post_treasury_credit(self.bot, ctx.guild, cfg.NATIONAL_TREASURY_STATE, result)
+        else:
+            await bank_msgs.announce_transaction(self.bot, ctx.guild, result)
 
     @commands.command(name="load-cash")
     @commands.guild_only()
@@ -212,7 +215,8 @@ class CBN(commands.Cog):
             return
         await ctx.send(f"✅ {cfg.money(value)} disbursed from the National Treasury to **{match} Treasury** "
                        f"· Ref {result['ref']}", allowed_mentions=NO_PINGS)
-        await bank_msgs.announce_transaction(self.bot, ctx.guild, result)
+        await bank_msgs.post_treasury_credit(self.bot, ctx.guild, match, result)
+        await bank_msgs.post_treasury_debit(self.bot, ctx.guild, cfg.NATIONAL_TREASURY_STATE, result)
 
     # --- errors -------------------------------------------------------------------------
 

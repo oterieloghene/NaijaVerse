@@ -41,7 +41,7 @@ import keke_database as kdb
 import location_permissions as perms
 import locations
 from bank_database import BankError
-from bank_messages import announce_transaction
+from bank_messages import post_treasury_debit
 from locations import LOCATIONS
 
 log = logging.getLogger("nvv.keke")
@@ -1183,7 +1183,7 @@ class Keke(commands.Cog):
             unit = KekeUnit(row, self._stop_channels, self.kekes)
             unit.spawn(self.bot)
             self.kekes[row["keke_id"]] = unit
-        await announce_transaction(self.bot, ctx.guild, result)
+        await post_treasury_debit(self.bot, ctx.guild, STATE, result)
 
     def _parse_zones(self, arg):
         """'A' / 'A,B' / 'A,B,C' (any spacing/case) -> sorted unique valid
