@@ -7,7 +7,7 @@ Delivers NIN cards and lets players set their portrait.
     draws them and posts them in the parcel-pickup channel of the state they were registered in.
     The due time lives in the database, so a restart or a sleeping Render service only delays a
     card, it never loses one.
-  - !portrait        (with an image attached) sets your portrait for your ID documents
+  - !portrait        (with an image attached, only in #immigration-office) sets your portrait
     !portrait remove  goes back to using your Discord avatar
   - !nincard [@player]   (admins) post a card in the current channel: with a player, that player's
     real card (same document number); with nobody, a dummy card for checking the layout.
@@ -25,6 +25,7 @@ from PIL import Image
 import database
 import document_config as cfg
 from document_renderer import prepare_stored_portrait
+from player_rules import is_immigration_office
 from location_permissions import state_location_channels
 from nin_card import generate_nin_card, sample_card_data
 
@@ -111,7 +112,10 @@ class NinDelivery(commands.Cog):
     @commands.command(name="portrait")
     @commands.guild_only()
     async def portrait(self, ctx, action: str = None):
-        """!portrait (attach an image) | !portrait remove"""
+        """!portrait (attach an image) | !portrait remove — only in #immigration-office"""
+        if not is_immigration_office(ctx.channel.name):
+            await ctx.send("This command can only be used in #immigration-office.")
+            return
         player = await database.get_player_by_discord_id(ctx.author.id)
         if not player:
             await ctx.send("You haven't arrived yet.")

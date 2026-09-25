@@ -2,7 +2,8 @@
 cogs/permit.py
 
 Residence permits: !permit registers a player's official address; the physical card follows 20
-minutes later, same mechanism as the NIN card (cogs/nin_delivery.py). Run by Immigration Officers.
+minutes later, same mechanism as the NIN card (cogs/nin_delivery.py). Run by Immigration Officers,
+in #front-desk only — same restriction as !name / !immigrate.
 
   !permit @player <house type>
       e.g.  !permit @Ada two-bedroom-flat
@@ -29,25 +30,13 @@ from discord.ext import commands, tasks
 
 import database
 import document_config as cfg
-from cogs.onboarding import IMMIGRATION_STAFF_ROLES
+from cogs.onboarding import front_desk_staff_only
 from location_permissions import state_location_channels, sync_member_permissions
 from permit_card import generate_permit_card, register_permit, sample_card_data
 
 NO_PINGS = discord.AllowedMentions.none()
 HOUSE_CATEGORY_ALIASES = {"low-cost": "low_cost_housing", "mid-class": "mid_class_residential",
                           "high-class": "high_class_residential"}
-
-
-def immigration_staff_only():
-    """!permit / !permitinfo: Immigration Officers (or admins) only."""
-    async def predicate(ctx):
-        member = ctx.author
-        if member.guild_permissions.administrator:
-            return True
-        if any(r.name.casefold() in IMMIGRATION_STAFF_ROLES for r in member.roles):
-            return True
-        raise commands.CheckFailure("Only Immigration Officers can use this command.")
-    return commands.check(predicate)
 
 
 class Permit(commands.Cog):
@@ -118,7 +107,7 @@ class Permit(commands.Cog):
 
     @commands.command(name="permit")
     @commands.guild_only()
-    @immigration_staff_only()
+    @front_desk_staff_only()
     async def permit(self, ctx, member: discord.Member, house_type: str):
         target = await database.get_player_by_discord_id(member.id)
         if not target or not target["current_state"]:
@@ -154,7 +143,7 @@ class Permit(commands.Cog):
 
     @commands.command(name="permitinfo")
     @commands.guild_only()
-    @immigration_staff_only()
+    @front_desk_staff_only()
     async def permit_info(self, ctx, category: str = None):
         """!permitinfo <low-cost|mid-class|high-class> — every resident of that category in your state."""
         category_key = HOUSE_CATEGORY_ALIASES.get((category or "").lower())
