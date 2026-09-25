@@ -37,10 +37,11 @@ Status: {status}
 ━━━━━━━━━━━━━━━━━━━━"""
 
 PARKED_BLOCK = """━━━━━━━━━━━━━━━━━━━━
-{emoji} {vehicle_type} PARKED
+{emoji} {name} PARKED
 Location: {stop_name}
-Cargo: {cargo_amount} {cargo_type}
-Fuel: {fuel_liters:.1f} L
+Cargo: {cargo_amount:.0f} {cargo_type}
+⛽: {fuel_liters:.2f} L
+Status: 🔴 Not in Service
 ━━━━━━━━━━━━━━━━━━━━"""
 
 
@@ -119,7 +120,7 @@ class OilTrip:
         stop_code = self.path[-1]
         block = PARKED_BLOCK.format(
             emoji=self.emoji,
-            vehicle_type=self.vehicle_type.upper(),
+            name=self.name.upper(),
             stop_name=_display_name(stop_code),
             cargo_amount=self.cargo_amount,
             cargo_type=self.cargo_type,
