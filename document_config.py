@@ -173,6 +173,13 @@ STATE_BANNER = {
     "Lagos": "LAGOS STATE",
     "Abuja": "FEDERAL CAPITAL TERRITORY",
 }
+# Heading colour matched to each state's template accent — dark enough to read on the white banner
+# box (a pure bright yellow would be illegible there, so Lagos gets a deep gold instead).
+STATE_BANNER_COLORS = {
+    "Delta": "#1B3A7A",   # blue, matches the Delta template
+    "Lagos": "#8A6A00",   # deep gold, reads clearly where bright yellow would not
+    "Abuja": "#1F5A3D",   # green, matches the Abuja template
+}
 # Which template a state's permit uses (keys into DOCUMENTS below).
 STATE_PERMIT_DOC = {"Delta": "permit_delta", "Lagos": "permit_lagos", "Abuja": "permit_abuja"}
 
@@ -192,7 +199,7 @@ PERMIT_CARD_FIELDS = {
     "lga":                  (537, 806, 874, 863),
     "date_of_issuance":     (921, 809, 1233, 855),
     "expiry_date":          (1283, 810, 1586, 854),
-    "issuing_authority":    (70, 955, 545, 1028),
+    "issuing_authority":    (70, 898, 178, 998),
     "signature":            (735, 955, 1175, 1028),
     "qr_code":              (1439, 944, 1591, 1094),
 }
@@ -214,7 +221,10 @@ PERMIT_CARD_TEXT = {
 }
 
 
-def _permit_entry(template_file):
+def _permit_entry(template_file, banner_color):
+    text_styles = dict(PERMIT_CARD_TEXT)
+    text_styles["state_banner"] = {**PERMIT_CARD_TEXT["state_banner"], "color": banner_color}
+    text_styles["issuing_authority"] = {**PERMIT_CARD_TEXT["issuing_authority"], "color": banner_color}
     return {
         "template_files": [template_file],
         # Detection doesn't work on this mockup's soft gradient background, so this is fixed:
@@ -222,7 +232,7 @@ def _permit_entry(template_file):
         "manual_crop": (359, 320, 2044, 1463),
         "corner_radius": None,
         "fields": PERMIT_CARD_FIELDS,
-        "text_styles": PERMIT_CARD_TEXT,
+        "text_styles": text_styles,
         "image_fields": {"portrait": "portrait", "qr_code": "qr", "issuing_authority": "stamp"},
         "portrait_corner_radius": 10,
         "portrait_centering": (0.5, 0.30),
@@ -248,7 +258,7 @@ DOCUMENTS = {
         "portrait_centering": (0.5, 0.30),   # crop focus: 0.30 = biased towards the top, keeps faces
         "qr_dark": "#0E1F16",
     },
-    "permit_delta": _permit_entry("naijaverse_permit_delta.jpg"),
-    "permit_abuja": _permit_entry("naijaverse_permit_abuja.jpg"),
-    "permit_lagos": _permit_entry("naijaverse_permit_lagos.jpg"),
+    "permit_delta": _permit_entry("naijaverse_permit_delta.jpg", STATE_BANNER_COLORS["Delta"]),
+    "permit_abuja": _permit_entry("naijaverse_permit_abuja.jpg", STATE_BANNER_COLORS["Abuja"]),
+    "permit_lagos": _permit_entry("naijaverse_permit_lagos.jpg", STATE_BANNER_COLORS["Lagos"]),
 }

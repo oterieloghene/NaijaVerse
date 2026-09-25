@@ -305,46 +305,62 @@ def make_qr_image(data, size, dark="#000000", light="#FFFFFF", quiet_modules=2):
 # Ink stamp (e.g. an issuing office's stamp, with a date)
 # ---------------------------------------------------------------------------
 
-def make_stamp_image(lines, size, color="#8B1E1E", angle=-9, border=3, corner_radius=10):
+def make_stamp_image(lines, size, color="#8B1E1E", angle=-6, border=5):
     """
-    A worn double-border "ink stamp" rectangle with the given lines of bold uppercase text,
-    rotated a few degrees like a hand-stamped mark. `lines` is a list of strings, e.g.
+    A bold, worn "ink stamp" oval with the given lines of bold uppercase text, rotated a few
+    degrees like a hand-stamped mark. `lines` is a list of strings, e.g.
     ["DELTA IMMIGRATION OFFICE", "ISSUED 22 SEP 2026"]. Returns an RGBA image sized to fit `size`
     once rotated (so it can be pasted straight onto the card without spilling outside its box).
     """
-    scale = 3
+    scale = 4
     w, h = size
     # draw oversized and un-rotated first, so the border and text stay crisp after rotation/shrink
     draw_w, draw_h = w * scale, h * scale
     stamp = Image.new("RGBA", (draw_w, draw_h), (0, 0, 0, 0))
     d = ImageDraw.Draw(stamp)
     ink = ImageColor.getrgb(color)
-    pad = 6 * scale
-    d.rounded_rectangle((pad, pad, draw_w - pad, draw_h - pad),
-                        radius=corner_radius * scale, outline=ink, width=border * scale)
-    inset = pad + 6 * scale
-    d.rounded_rectangle((inset, inset, draw_w - inset, draw_h - inset),
-                        radius=max(2, corner_radius * scale - 6 * scale), outline=ink, width=max(1, border * scale // 2))
+    pad = 5 * scale
+    outer = (pad, pad, draw_w - pad, draw_h - pad)
+    d.ellipse(outer, outline=ink, width=border * scale)
+    inset = pad + 9 * scale
+    d.ellipse((inset, inset, draw_w - inset, draw_h - inset), outline=ink, width=max(2, border * scale // 2))
 
-    usable_h = draw_h - 2 * inset - 4 * scale
-    line_h = usable_h / max(len(lines), 1)
-    size_px = max(10, int(line_h * 0.62))
+    # text sits inside the ellipse: each line's available width is that ellipse's chord at its
+    # own vertical offset from centre, so lines further from the middle get less width, not more
+    rx, ry = (outer[2] - outer[0]) / 2, (outer[3] - outer[1]) / 2
+    cx, cy0 = draw_w / 2, draw_h / 2
+    text_h = ry * 1.5   # block of text spans this tall, centred vertically
+    line_h = text_h / max(len(lines), 1)
+    size_px = max(10, int(line_h * 0.68))
     font = _font(cfg.FONTS["bold"], size_px)
+    safety = 0.74   # keep clear of the inner ring, not just the outer edge
+    line_positions = []
     for i, line in enumerate(lines):
-        text = line.upper()
-        while font.getlength(text) > (draw_w - 2 * inset - 8 * scale) and size_px > 8:
-            size_px -= 2
-            font = _font(cfg.FONTS["bold"], size_px)
-        cy = inset + 2 * scale + line_h * (i + 0.5)
-        d.text((draw_w / 2, cy), text, font=font, fill=ink, anchor="mm")
+        cy = cy0 - text_h / 2 + line_h * (i + 0.5)
+        dy = cy - cy0
+        chord = 2 * rx * (1 - (dy / ry) ** 2) ** 0.5 * safety if abs(dy) < ry else 0
+        line_positions.append((cy, chord))
+    # one font size for every line, sized to the tightest line so nothing pokes past the ring
+    tightest = min(chord for _, chord in line_positions)
+    while size_px > 8 and max(font.getlength(l.upper()) for l in lines) > tightest:
+        size_px -= 2
+        font = _font(cfg.FONTS["bold"], size_px)
+    for text, (cy, _) in zip(lines, line_positions):
+        d.text((cx, cy), text.upper(), font=font, fill=ink, anchor="mm")
+    # a small decorative rule between two lines, like a classic office stamp
+    if len(lines) > 1:
+        rule_y = cy0 - text_h / 2 + line_h
+        half = rx * (1 - ((rule_y - cy0) / ry) ** 2) ** 0.5 * 0.4
+        d.line((cx - half, rule_y, cx + half, rule_y), fill=ink, width=max(1, scale))
 
-    # a light noisy/worn look: knock out a faint random speckle so it doesn't look computer-perfect
+    # a bold worn look: knock out a noisy speckle so it doesn't look computer-perfect
     speckle = Image.new("L", stamp.size, 0)
     ds = ImageDraw.Draw(speckle)
     rng = random.Random(sum(map(ord, "".join(lines))))
-    for _ in range(int(draw_w * draw_h * 0.0006)):
+    for _ in range(int(draw_w * draw_h * 0.001)):
         x, y = rng.randint(0, draw_w - 1), rng.randint(0, draw_h - 1)
-        ds.ellipse((x, y, x + scale, y + scale), fill=rng.randint(60, 160))
+        r = rng.randint(1, scale)
+        ds.ellipse((x, y, x + r, y + r), fill=rng.randint(70, 170))
     alpha = stamp.split()[3]
     alpha = ImageChops.subtract(alpha, speckle)
     stamp.putalpha(alpha)
