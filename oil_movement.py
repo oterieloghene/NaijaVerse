@@ -90,9 +90,11 @@ class OilTrip:
         return _display_name(self.path[-1])
 
     async def _send(self, stop_code, block):
-        channel = self.channel_map.get(stop_code)
+        post_code = oc.MESSAGE_STOP_OVERRIDE.get(stop_code, stop_code)
+        channel = self.channel_map.get(post_code)
         if channel is None:
-            log.warning("No channel mapped for stop %s — %s block dropped.", stop_code, self.name)
+            log.warning("No channel mapped for stop %s (posting as %s) — %s block dropped.",
+                        stop_code, post_code, self.name)
             return None
         try:
             return await channel.send(block)
@@ -124,8 +126,11 @@ class OilTrip:
             fuel_liters=self.fuel_liters,
         )
         message = await self._send(stop_code, block)
-        channel = self.channel_map.get(stop_code)
+        post_code = oc.MESSAGE_STOP_OVERRIDE.get(stop_code, stop_code)
+        channel = self.channel_map.get(post_code)
         if message is not None and channel is not None:
+            # stop_code (the parent) is what's stored for routing purposes;
+            # channel.id is wherever the message actually landed.
             await odb.set_parked(self.vehicle_id, channel.id, message.id, stop_code)
 
     async def _run(self):

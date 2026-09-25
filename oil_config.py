@@ -37,9 +37,9 @@ FUEL_LEDGER = "{S} Oil Fleet Fuel Ledger"   # treasury/narration label, per stat
 # Drilling (oil well, Delta only)
 # ---------------------------------------------------------------------------
 
-DRILL_YIELD_BARRELS = 50         # per `!drill crude` call
-DRILL_COOLDOWN_SECONDS = 5 * 60  # test time: 5 min between calls
-DRILL_COST = 300_000             # NGN, equipment/operating cost per call
+DRILL_YIELD_BARRELS = 50         # per `!drill crude` job
+DRILL_DURATION_SECONDS = 5 * 60  # test time: drilling itself takes 5 min, not instant
+DRILL_COST = 300_000             # NGN, equipment/operating cost per call (debited on start)
 
 WELL_STOCKPILE_CAP = 200         # barrels sitting at the oil well
 
@@ -96,6 +96,15 @@ NNPC_STOP = "automotive-district"
 REFINERY_STOP = "industrial-district"
 OIL_WELL_STOP = "oil-well"
 IMMIGRATION_STOP = "immigration-office"
+
+# Vehicles route/park at the PARENT district stop above (that's what's
+# stored as stop_code), but their actual messages — parked/departing/
+# in-transit/arrival — should post in the specific sub-location channel
+# inside that district, not the district channel itself.
+MESSAGE_STOP_OVERRIDE = {
+    NNPC_STOP: "nnpc-fuel-station",
+    REFINERY_STOP: "refinery",
+}
 
 # Distance per segment. Reusing keke's flat figure (1.875km/segment) across
 # the whole line, including the two new segments (commercial-district <->
