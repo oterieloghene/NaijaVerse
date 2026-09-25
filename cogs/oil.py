@@ -187,7 +187,7 @@ class Oil(commands.Cog):
         except BankError as e:
             await ctx.send(str(e))
             return
-        await self._park_new_vehicle(result["vehicle_id"], "trailer")
+        await self._park_new_vehicle(result["vehicle_id"], "trailer", result["name"], oc.TRAILER_TANK_CAPACITY_L)
         await ctx.send(
             f"🚛 **{result['name']}** purchased for ₦{oc.TRAILER_COST:,} — parked at NNPC Fuel Station."
         )
@@ -201,19 +201,20 @@ class Oil(commands.Cog):
         except BankError as e:
             await ctx.send(str(e))
             return
-        await self._park_new_vehicle(result["vehicle_id"], "tanker")
+        await self._park_new_vehicle(result["vehicle_id"], "tanker", result["name"], oc.TANKER_TANK_CAPACITY_L)
         await ctx.send(
             f"🛢️ **{result['name']}** purchased for ₦{oc.TANKER_COST:,} — parked at NNPC Fuel Station."
         )
 
-    async def _park_new_vehicle(self, vehicle_id, vehicle_type):
+    async def _park_new_vehicle(self, vehicle_id, vehicle_type, name, fuel_liters):
         channel = self._message_channel(oc.NNPC_STOP)
         if channel is None:
             return
         emoji = "🚛" if vehicle_type == "trailer" else "🛢️"
         message = await channel.send(
-            f"━━━━━━━━━━━━━━━━━━━━\n{emoji} {vehicle_type.upper()} PARKED\n"
-            f"Location: NNPC Fuel Station\nCargo: 0 none\n━━━━━━━━━━━━━━━━━━━━"
+            f"━━━━━━━━━━━━━━━━━━━━\n{emoji} {name.upper()} PARKED\n"
+            f"Location: NNPC Fuel Station\nCargo: 0 none\n"
+            f"⛽: {fuel_liters:.2f} L\nStatus: 🔴 Not in Service\n━━━━━━━━━━━━━━━━━━━━"
         )
         await odb.set_parked(vehicle_id, channel.id, message.id, oc.NNPC_STOP)
 
@@ -251,8 +252,9 @@ class Oil(commands.Cog):
         emoji = "🚛" if row["vehicle_type"] == "trailer" else "🛢️"
         cargo = f"{row['cargo_amount']:.0f} {row['cargo_type']}" if row["cargo_type"] != "none" else "0 none"
         message = await channel.send(
-            f"━━━━━━━━━━━━━━━━━━━━\n{emoji} {row['vehicle_type'].upper()} PARKED\n"
-            f"Location: {stop.replace('-', ' ').title()}\nCargo: {cargo}\n━━━━━━━━━━━━━━━━━━━━"
+            f"━━━━━━━━━━━━━━━━━━━━\n{emoji} {row['name'].upper()} PARKED\n"
+            f"Location: {stop.replace('-', ' ').title()}\nCargo: {cargo}\n"
+            f"⛽: {row['fuel_liters']:.2f} L\nStatus: 🔴 Not in Service\n━━━━━━━━━━━━━━━━━━━━"
         )
         await odb.set_parked(row["vehicle_id"], channel.id, message.id, stop)
         await ctx.send(f"**{row['name']}** parked at {stop.replace('-', ' ').title()}.")
