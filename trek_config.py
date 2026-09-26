@@ -3,22 +3,20 @@ trek_config.py
 
 On-foot travel (!walk / !trek) — Delta only for now.
 
-There is no existing "every parent location, in geographic order" list for a
-state — keke_config.STOP_CODES only covers the 17 stops a *keke* actually
-stops at. A pedestrian isn't limited to the keke route, so a trekker needs
-the FULL walking order: those same 17 stops, with the 16 "exempt" locations
-(the ones a keke jumps over) slotted in next to the hub keke_config already
-says they're closest to (EXEMPT_ZONES / ZONE_HUB).
+Walking order comes from delta_location_order.py — the real, manually
+confirmed north-to-south geography of all 33 Delta parent locations. It does
+NOT come from keke_config.ZONE_HUB: that's only where a keke arbitrarily
+drops a passenger closest to an exempt destination, not where that
+destination actually is (see delta_location_order.py for why that matters
+and how each zone's real order was worked out).
 
-This does NOT reuse keke's hub-dropoff behaviour — a trekker always walks
-all the way to their real destination, never a substitute hub. The zone/hub
-data is only borrowed here to work out physical ORDER, i.e. how many
-locations lie between two points and which channels lie on that path.
+This does NOT reuse keke's hub-dropoff behaviour either way — a trekker
+always walks all the way to their real destination, never a substitute hub.
 
-Source of truth for names/order: locations_codenames.csv (via keke_config),
-so this never drifts out of sync with the approved codename list.
+Source of truth for codenames: locations_codenames.csv (via keke_config).
 """
 
+import delta_location_order as dlo
 import keke_config as kc
 
 STATE = "Delta"
@@ -35,33 +33,8 @@ WALKED_PAST_TEMPLATE = "{name} just walked past here..."
 ARRIVED_TEMPLATE = "🚶 {mention} has arrived at {destination}."
 DEPARTED_TEMPLATE = "🚶 {name} set out trekking to {destination}. ETA: {eta}."
 
-
-def _build_full_walk_order():
-    """
-    The 17 keke stops, in order, with each zone's exempt (off-spine)
-    locations inserted right after that zone's hub stop, in the order they
-    appear in locations_codenames.csv.
-    """
-    zone_words = {zone: [] for zone in kc.ZONE_HUB}
-    for cmd in kc.CODENAMES:                      # dict preserves CSV row order
-        word = cmd[len("!keke "):] if cmd.startswith("!keke ") else cmd
-        if word in kc.EXEMPT_CODES:
-            zone_words[kc.EXEMPT_ZONES[word]].append(word)
-
-    order = []
-    for stop_code in kc.STOP_CODES:
-        order.append(stop_code)
-        for zone, hub_code in kc.ZONE_HUB.items():
-            if stop_code == hub_code:
-                for word in zone_words[zone]:
-                    dest = kc.codename_dest(f"!keke {word}")
-                    if dest is not None:
-                        order.append(dest[1])     # location_code
-    return order
-
-
-FULL_WALK_ORDER = _build_full_walk_order()
-_WALK_INDEX = {code: i for i, code in enumerate(FULL_WALK_ORDER)}
+FULL_WALK_ORDER = dlo.DELTA_LOCATION_ORDER
+_WALK_INDEX = dlo.DELTA_LOCATION_INDEX
 
 assert len(FULL_WALK_ORDER) == len(kc.CODENAMES), (
     "trek walk order missing/duplicating a codename destination"

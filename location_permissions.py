@@ -224,7 +224,7 @@ async def writable_codes(member, player):
 async def _apply(channel, member, write, hide, history=False):
     """
     Make the member's personal overwrite on a channel match the wanted state.
-      write    True -> personal Send Messages allow; False -> remove it
+      write    True -> personal Send Messages + Send Messages in Threads allow; False -> remove them
       hide     True -> personal View Channel deny (only if they'd otherwise see it); False -> remove it
       history  True -> personal Read Message History allow; False -> remove it
     Returns True if anything changed.
@@ -236,6 +236,12 @@ async def _apply(channel, member, write, hide, history=False):
         wanted = True if write else None
         if overwrite.send_messages != wanted:
             overwrite.send_messages = wanted
+            changed = True
+
+    if overwrite.send_messages_in_threads is not False:  # explicit member-level deny (mute): leave alone
+        wanted = True if write else None
+        if overwrite.send_messages_in_threads != wanted:
+            overwrite.send_messages_in_threads = wanted
             changed = True
 
     if overwrite.read_message_history is not False:   # explicit member-level deny: leave alone
