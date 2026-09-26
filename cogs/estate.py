@@ -35,6 +35,19 @@ If the bot auto-expires a pass (visitor didn't end it themselves), that
 owner can't issue a new pass to that same visitor for
 guest_pass_config.COOLDOWN_MINUTES.
 
+IMPORTANT — every handler here defers first: Discord gives an interaction
+only 3 seconds to get its first response. Several of these handlers do
+multiple DB calls plus Discord API calls (posting to staff-office, adding a
+role, adding a visitor to several threads, syncing location permissions
+across a whole guild) before they have anything to say back to the user —
+easily enough to blow past 3 seconds. If that happens, Discord shows the
+interaction as failed EVEN THOUGH the underlying action (the DB write, the
+role grant, the thread tagging) already went through — the person sees
+"something went wrong" for a request that actually succeeded. Deferring
+immediately buys up to 15 minutes before the real reply
+(interaction.followup.send / interaction.edit_original_response) is due,
+which is what every handler below now does before touching the database.
+
 Note: ApprovalView/PostApprovalView use timeout=None so they don't expire
 while an officer is slow to respond, but like the rest of the phone UI
 they aren't re-registered as persistent views on restart — a request left
@@ -219,29 +232,30 @@ class EstateMenuView(discord.ui.View):
 
     @discord.ui.button(label="End Visit", emoji="🚪", style=discord.ButtonStyle.secondary, row=1)
     async def end_visit(self, interaction, button):
+        await interaction.response.defer(ephemeral=True)
         rows = await gdb.get_active_for_visitor(interaction.user.id)
         if not rows:
-            await interaction.response.send_message("You don't have an active pass.", ephemeral=True)
+            await interaction.followup.send("You don't have an active pass.", ephemeral=True)
             return
         request = rows[0]
         await gdb.end_early(request["request_id"])
         await _revoke_access(interaction.guild, request, interaction.user)
-        await interaction.response.send_message("Visit ended — access removed, no cooldown.", ephemeral=True)
+        await interaction.followup.send("Visit ended — access removed, no cooldown.", ephemeral=True)
 
     @discord.ui.button(label="Kick Guest", emoji="🥾", style=discord.ButtonStyle.secondary, row=1)
     async def kick_guest(self, interaction, button):
+        await interaction.response.defer(ephemeral=True)
         owner = await database.get_player_by_discord_id(interaction.user.id)
         assignment = await hdb.get_assignment(owner["player_id"], owner["current_state"]) if owner else None
         if not owner or not assignment or assignment["house_type"] != owner["current_sub_location"]:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "You need to be standing in your own house to kick a guest.", ephemeral=True)
             return
         rows = await gdb.get_active_for_assignment(assignment["assignment_id"])
         if not rows:
-            await interaction.response.send_message("You don't have any guests to kick right now.",
-                                                      ephemeral=True)
+            await interaction.followup.send("You don't have any guests to kick right now.", ephemeral=True)
             return
-        await interaction.response.send_message(
+        await interaction.followup.send(
             "Who do you want to kick?", view=KickGuestView(interaction.guild, rows), ephemeral=True)
 
     @discord.ui.button(label="Back", emoji="⬅️", style=discord.ButtonStyle.secondary, row=2)
@@ -271,30 +285,30 @@ class ApplyModal(discord.ui.Modal, title="Apply for a Guest Pass"):
             self.add_item(item)
 
     async def on_submit(self, interaction):
+        await interaction.response.defer(ephemeral=True)
+
         owner = await database.get_player_by_discord_id(interaction.user.id)
         if not owner:
-            await interaction.response.send_message("Something went wrong finding your character.",
-                                                      ephemeral=True)
+            await interaction.followup.send("Something went wrong finding your character.", ephemeral=True)
             return
 
         state, house_type = owner["current_state"], owner["current_sub_location"]
         assignment = await hdb.get_assignment(owner["player_id"], state) if state else None
         if not assignment or assignment["house_type"] != house_type:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "You need to be standing in your own house to apply for a pass.", ephemeral=True)
             return
 
         visitor_member = _parse_visitor(interaction.guild, self.visitor.value)
         if visitor_member is None or visitor_member.id == interaction.user.id:
-            await interaction.response.send_message("Couldn't find that visitor.", ephemeral=True)
+            await interaction.followup.send("Couldn't find that visitor.", ephemeral=True)
             return
         visitor_player = await database.get_player_by_discord_id(visitor_member.id)
         if not visitor_player:
-            await interaction.response.send_message(f"{visitor_member.display_name} hasn't arrived yet.",
-                                                      ephemeral=True)
+            await interaction.followup.send(f"{visitor_member.display_name} hasn't arrived yet.", ephemeral=True)
             return
         if await gdb.get_active_for_visitor(visitor_member.id):
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"{visitor_member.display_name} already has an active guest pass elsewhere.", ephemeral=True)
             return
 
@@ -302,7 +316,7 @@ class ApplyModal(discord.ui.Modal, title="Apply for a Guest Pass"):
         now = dt.datetime.now(dt.timezone.utc)
         if until and until > now:
             minutes_left = int((until - now).total_seconds() // 60) + 1
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"You can't invite {visitor_member.display_name} again for another {minutes_left} minute(s).",
                 ephemeral=True)
             return
@@ -310,7 +324,7 @@ class ApplyModal(discord.ui.Modal, title="Apply for a Guest Pass"):
         options = _room_options(house_type)
         keys, error = _parse_thread_keys(self.threads.value, options)
         if error:
-            await interaction.response.send_message(error, ephemeral=True)
+            await interaction.followup.send(error, ephemeral=True)
             return
 
         try:
@@ -318,9 +332,8 @@ class ApplyModal(discord.ui.Modal, title="Apply for a Guest Pass"):
         except ValueError:
             requested_minutes = -1
         if not (0 < requested_minutes <= gcfg.MAX_REQUESTED_MINUTES):
-            await interaction.response.send_message(
-                f"Duration must be a whole number of minutes, up to {gcfg.MAX_REQUESTED_MINUTES}.",
-                ephemeral=True)
+            await interaction.followup.send(
+                f"Duration must be a whole number of minutes, up to {gcfg.MAX_REQUESTED_MINUTES}.", ephemeral=True)
             return
 
         request_id = await gdb.create_request(
@@ -345,7 +358,7 @@ class ApplyModal(discord.ui.Modal, title="Apply for a Guest Pass"):
                                                allowed_mentions=NO_PINGS)
             await gdb.set_message_ref(request_id, staff_office.id, message.id)
 
-        await interaction.response.send_message(
+        await interaction.followup.send(
             "Your guest pass request has been sent to the Housing Officers.", ephemeral=True)
 
 
@@ -362,12 +375,14 @@ class DurationModal(discord.ui.Modal, title="Set Pass Duration"):
         self.add_item(self.minutes)
 
     async def on_submit(self, interaction):
+        await interaction.response.defer(ephemeral=True)
+
         try:
             granted = int(self.minutes.value.strip())
         except ValueError:
             granted = -1
         if not (0 < granted <= gcfg.MAX_REQUESTED_MINUTES):
-            await interaction.response.send_message("Enter a whole number of minutes.", ephemeral=True)
+            await interaction.followup.send("Enter a whole number of minutes.", ephemeral=True)
             return
         code = await _generate_code()
         await gdb.approve(self.request_id, granted, code, interaction.user.id)
@@ -379,7 +394,8 @@ class DurationModal(discord.ui.Modal, title="Set Pass Duration"):
             f"By {interaction.user.mention} — granted {granted} minute(s).\n"
             f"**Code:** `{code}` — relay this to the visitor yourself."
         ), inline=False)
-        await interaction.response.edit_message(embed=embed, view=PostApprovalView(request["request_id"]))
+        await interaction.message.edit(embed=embed, view=PostApprovalView(request["request_id"]))
+        await interaction.followup.send(f"Approved — code `{code}` generated.", ephemeral=True)
 
 
 class ApprovalView(discord.ui.View):
@@ -399,21 +415,23 @@ class ApprovalView(discord.ui.View):
         if request is None or request["status"] != "pending":
             await interaction.response.send_message("This request has already been decided.", ephemeral=True)
             return
+        # Modals can only be sent as the interaction's raw first response — no defer before this one.
         await interaction.response.send_modal(
             DurationModal(self.request_id, self.state, request["requested_minutes"]))
 
     @discord.ui.button(label="Deny", emoji="❌", style=discord.ButtonStyle.danger)
     async def deny(self, interaction, button):
+        await interaction.response.defer(ephemeral=True)
         request = await gdb.get_request(self.request_id)
         if request is None or request["status"] != "pending":
-            await interaction.response.send_message("This request has already been decided.", ephemeral=True)
+            await interaction.followup.send("This request has already been decided.", ephemeral=True)
             return
         await gdb.deny(self.request_id, interaction.user.id)
         embed = interaction.message.embeds[0]
         embed.colour = 0xB71C1C
         embed.add_field(name="❌ Denied", value=f"By {interaction.user.mention}", inline=False)
         self.stop()
-        await interaction.response.edit_message(embed=embed, view=None)
+        await interaction.message.edit(embed=embed, view=None)
 
 
 class PostApprovalView(discord.ui.View):
@@ -425,20 +443,21 @@ class PostApprovalView(discord.ui.View):
 
     @discord.ui.button(label="Revoke (unredeemed)", emoji="🚫", style=discord.ButtonStyle.danger)
     async def revoke(self, interaction, button):
+        await interaction.response.defer(ephemeral=True)
         request = await gdb.get_request(self.request_id)
         if request is None or request["status"] != "ready":
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "This code has already been used or is no longer live.", ephemeral=True)
             return
         if not _is_officer(interaction.user, request["state"]):
-            await interaction.response.send_message("Only Housing Officers can do that.", ephemeral=True)
+            await interaction.followup.send("Only Housing Officers can do that.", ephemeral=True)
             return
         await gdb.revoke_ready(self.request_id, interaction.user.id)
         embed = interaction.message.embeds[0]
         embed.colour = 0x757575
         embed.add_field(name="🚫 Revoked", value=f"By {interaction.user.mention} before redemption.", inline=False)
         self.stop()
-        await interaction.response.edit_message(embed=embed, view=None)
+        await interaction.message.edit(embed=embed, view=None)
 
 
 # ---------------------------------------------------------------------------
@@ -454,19 +473,21 @@ class RedeemModal(discord.ui.Modal, title="Redeem Guest Pass Code"):
         self.add_item(self.code)
 
     async def on_submit(self, interaction):
+        await interaction.response.defer(ephemeral=True)
+
         code = self.code.value.strip()
         request = await gdb.find_ready_by_code(interaction.user.id, code)
         if request is None:
-            await interaction.response.send_message("Invalid or expired code.", ephemeral=True)
+            await interaction.followup.send("Invalid or expired code.", ephemeral=True)
             return
         if await gdb.get_active_for_visitor(interaction.user.id):
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "You already have an active pass — end it first with End Visit.", ephemeral=True)
             return
         expires_at = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=request["granted_minutes"])
         await gdb.redeem(request["request_id"], expires_at)
         await _grant_access(interaction.guild, request, interaction.user)
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"✅ Pass redeemed — you have access until <t:{int(expires_at.timestamp())}:t>.", ephemeral=True)
 
 
@@ -484,10 +505,12 @@ class KickGuestSelect(discord.ui.Select):
         super().__init__(placeholder="Choose a guest to kick", options=options)
 
     async def callback(self, interaction):
+        await interaction.response.defer(ephemeral=True)
+
         request_id = int(self.values[0])
         request = await gdb.get_request(request_id)
         if request is None or request["status"] != "redeemed":
-            await interaction.response.send_message("That pass is no longer active.", ephemeral=True)
+            await interaction.followup.send("That pass is no longer active.", ephemeral=True)
             return
 
         guild = interaction.guild
@@ -516,7 +539,7 @@ class KickGuestSelect(discord.ui.Select):
             except discord.HTTPException:
                 pass
 
-        await interaction.response.edit_message(content="Guest kicked — access removed.", view=None)
+        await interaction.edit_original_response(content="Guest kicked — access removed.", view=None)
 
 
 class KickGuestView(discord.ui.View):
