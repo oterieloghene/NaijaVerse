@@ -32,13 +32,19 @@ AUTO_ARCHIVE = 10080  # 7 days — the longest Discord allows
 
 
 async def _get_thread(guild, thread_id):
-    thread = guild.get_thread(thread_id)
-    if thread is not None:
-        return thread
+    """
+    Fetch live rather than trust the cache first: guild.get_thread() can hold
+    a stale object (e.g. archived by Discord's own timer while nobody was
+    syncing against it), and _set_locked()'s archived/locked comparison needs
+    the real current state or it silently skips the edit that would actually
+    unarchive/unlock the thread.
+    """
     try:
         channel = await guild.fetch_channel(thread_id)
     except discord.NotFound:
         return None
+    except discord.HTTPException:
+        return guild.get_thread(thread_id)   # fetch failed — best effort from cache
     return channel if isinstance(channel, discord.Thread) else None
 
 

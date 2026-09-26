@@ -56,12 +56,15 @@ The bot owns member-level "View Channel: deny" overwrites on location channels.
 """
 
 import asyncio
+import logging
 import re
 
 import discord
 
 import database
 import housing_threads
+
+log = logging.getLogger("nvv.permissions")
 from locations import LOCATIONS, STATES, guest_pass_needed, has_access
 
 REASON = "Location permissions"
@@ -309,8 +312,12 @@ async def sync_member_permissions(member):
 
         try:
             await housing_threads.sync_house_locks(member.guild, player)
-        except discord.HTTPException as exc:
-            print(f"[permissions] Couldn't sync house threads for {member}: {exc}")
+        except Exception:
+            # Was `except discord.HTTPException` only — anything else (bad
+            # house_type lookup, a DB error, etc.) used to propagate silently
+            # up to the caller instead of showing up anywhere. Log it with a
+            # full traceback so a failed thread sync is visible.
+            log.exception("Couldn't sync house threads for %s", member)
 
 
 async def clear_member_permissions(member):
