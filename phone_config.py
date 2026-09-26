@@ -49,7 +49,7 @@ APPS = [
     ("bus", "Bus", "🚌"), ("taxi", "Taxi", "🚕"), ("dispatch", "Dispatch", "📦"),
     ("mechanic", "Mechanic", "🔧"), ("bank", "Bank", "🏦"), ("emergency", "Emergency", "🚨"),
     ("flight", "Flight", "✈️"), ("hotel", "Hotel", "🏨"), ("job", "Job", "💼"),
-    ("smart", "Smart", "📲"), ("shopping", "Shopping", "🛍️"), ("contacts", "Contacts", "👤"),
+    ("estate", "Estate", "🏘️"), ("shopping", "Shopping", "🛍️"), ("contacts", "Contacts", "👤"),
 ]
 APPS_PER_ROW = 3
 
