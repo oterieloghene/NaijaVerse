@@ -174,6 +174,14 @@ async def get_active_for_visitor(visitor_discord_id):
         )
 
 
+async def get_active_for_assignment(assignment_id):
+    async with database.get_pool().acquire() as conn:
+        return await conn.fetch(
+            "SELECT * FROM guest_pass_requests WHERE assignment_id = $1 AND status = 'redeemed';",
+            assignment_id,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Cooldowns
 # ---------------------------------------------------------------------------
