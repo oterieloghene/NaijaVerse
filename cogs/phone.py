@@ -156,6 +156,9 @@ class HomeView(OwnedView):
         async def callback(interaction):
             if key == "bank":
                 await open_bank(interaction)
+            elif key == "estate":
+                from cogs.estate import open_estate
+                await open_estate(interaction)
             else:
                 await interaction.response.defer()       # app not built yet: silently do nothing
         return callback
