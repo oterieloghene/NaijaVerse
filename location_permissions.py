@@ -61,6 +61,7 @@ import re
 import discord
 
 import database
+import housing_threads
 from locations import LOCATIONS, STATES, guest_pass_needed, has_access
 
 REASON = "Location permissions"
@@ -305,6 +306,11 @@ async def sync_member_permissions(member):
                     await _apply(channel, member, write, hide, history)
                 except discord.HTTPException as exc:
                     print(f"[permissions] Couldn't update #{channel.name} for {member}: {exc}")
+
+        try:
+            await housing_threads.sync_house_locks(member.guild, player)
+        except discord.HTTPException as exc:
+            print(f"[permissions] Couldn't sync house threads for {member}: {exc}")
 
 
 async def clear_member_permissions(member):
