@@ -90,6 +90,13 @@ class Housing(commands.Cog):
             return
 
         state = _channel_state(ctx.channel)
+
+        if not ctx.author.guild_permissions.administrator:
+            officer = await database.get_player_by_discord_id(ctx.author.id)
+            if not officer or officer["current_state"] != state or officer["current_sub_location"] != "rental-desk":
+                await ctx.send("You need to be at the Rental Desk yourself to assign a house.")
+                return
+
         target = await database.get_player_by_discord_id(member.id)
         if not target or target["current_state"] != state or target["current_sub_location"] != "rental-desk":
             await ctx.send(f"{member.mention} needs to be at the Rental Desk before a house can be assigned.",
@@ -187,7 +194,11 @@ class Housing(commands.Cog):
         if missing_homeless:
             problems.append('find the role "Homeless"')
 
-        await database.update_player_field(target["player_id"], "current_sub_location", "immigration-office")
+        # Only stranded if they were actually standing in the house being
+        # evicted — if they're at rental-desk, banking-hall, wherever else,
+        # leave their location alone entirely.
+        if target["current_sub_location"] == house_type:
+            await database.update_player_field(target["player_id"], "current_sub_location", "immigration-office")
         await sync_member_permissions(member)
 
         house_label = cfg.HOUSE_TYPES[house_type][1]
@@ -242,6 +253,20 @@ class Housing(commands.Cog):
             )
         except discord.HTTPException:
             pass
+
+
+    async def cog_command_error(self, ctx, error):
+        if isinstance(error, commands.CheckFailure):
+            await ctx.send(str(error) or "You can't use that command.")
+        elif isinstance(error, commands.MissingRequiredArgument):
+            await ctx.send(f"Usage: `!{ctx.command.name} @player <house_type>`.")
+        elif isinstance(error, commands.MemberNotFound):
+            await ctx.send("I couldn't find that player: mention them with @.")
+        elif isinstance(error, commands.NoPrivateMessage):
+            await ctx.send("Use this in the server.")
+        else:
+            print(f"[housing] command error: {error!r}")
+            await ctx.send("Something went wrong. Please try again.")
 
 
 async def setup(bot):
