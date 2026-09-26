@@ -55,7 +55,7 @@ class RPBot(commands.Bot):
         except Exception as exc:
             print(f"Residence permit delivery NOT loaded: {exc!r}")
         # banking must load before the phone and the keke: both use the bank tables
-        for extension in ("cogs.banking", "cogs.phone", "cogs.cbn", "cogs.keke", "cogs.oil", "cogs.housing"):
+        for extension in ("cogs.banking", "cogs.phone", "cogs.cbn", "cogs.keke", "cogs.oil", "cogs.housing", "cogs.trek"):
             try:
                 await self.load_extension(extension)
             except Exception as exc:
