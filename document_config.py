@@ -33,6 +33,18 @@ FONTS_DIR = ASSETS_DIR / "fonts"
 TEMPLATES_DIR = ASSETS_DIR / "templates"
 STAMPS_DIR = ASSETS_DIR / "stamps"
 
+
+def _find_asset(filename, *search_dirs):
+    """First existing path for `filename` across the given directories (checked in order); falls
+    back to the first directory (even if it doesn't exist yet) so the error message on use is
+    clear about where the file is expected. Makes asset lookup tolerant of a file landing in a
+    neighbouring assets folder instead of its intended one."""
+    for d in search_dirs:
+        path = d / filename
+        if path.exists():
+            return path
+    return search_dirs[0] / filename
+
 FONTS = {
     "bold": FONTS_DIR / "WorkSans-Bold.ttf",
     "signature": FONTS_DIR / "NothingYouCouldDo-Regular.ttf",
@@ -186,9 +198,9 @@ STATE_PERMIT_DOC = {"Delta": "permit_delta", "Lagos": "permit_lagos", "Abuja": "
 # The pre-made circular stamp artwork per state (blue/gold/green), with a blank "DATE ___" line
 # that the date gets stamped onto at render time — see make_date_stamp_image.
 STATE_STAMP_FILES = {
-    "Delta": STAMPS_DIR / "naijaverse_stamp_delta.png",
-    "Lagos": STAMPS_DIR / "naijaverse_stamp_lagos.png",
-    "Abuja": STAMPS_DIR / "naijaverse_stamp_abuja.png",
+    "Delta": _find_asset("naijaverse_stamp_delta.png", STAMPS_DIR, TEMPLATES_DIR),
+    "Lagos": _find_asset("naijaverse_stamp_lagos.png", STAMPS_DIR, TEMPLATES_DIR),
+    "Abuja": _find_asset("naijaverse_stamp_abuja.png", STAMPS_DIR, TEMPLATES_DIR),
 }
 
 # All three templates share one layout, just a different colour skin, so one set of coordinates
@@ -249,6 +261,51 @@ def _permit_entry(template_file, banner_color, stamp_file):
     }
 
 
+# ---------------------------------------------------------------------------
+# International Passport
+# ---------------------------------------------------------------------------
+
+PASSPORT_DELAY_MINUTES = 0   # issued immediately, unlike the NIN card / residence permit
+PASSPORT_VALIDITY_DAYS = int(os.environ.get("PASSPORT_VALIDITY_DAYS", "90"))
+PASSPORT_ISSUING_AUTHORITY = "NAIJAVERSE IMMIGRATION SERVICE"
+
+# The template is already just the passport's left (data) page — cropped ahead of time from the
+# two-page spread you supplied, so no further cropping is needed at render time.
+PASSPORT_TEMPLATE_FILE = "naijaverse_passport_template.png"
+PASSPORT_INK = "#1A1611"
+
+# Coordinates measured directly from the template (pixel-scanned label rows, not eyeballed) —
+# left page only, per the brief: the right (Travel Records) page is never touched.
+PASSPORT_FIELDS = {
+    "portrait":        (86, 705, 410, 1124),
+    "surname":         (445, 719, 900, 763),
+    "given_names":     (445, 789, 900, 863),
+    "nationality":     (445, 891, 575, 934),
+    "date_of_birth":   (600, 891, 900, 934),
+    "sex":             (445, 960, 575, 1003),
+    "state_of_birth":  (600, 960, 900, 1003),
+    "date_of_issue":   (445, 1030, 575, 1073),
+    "passport_no":     (600, 1030, 900, 1073),
+    "date_of_expiry":  (445, 1098, 575, 1141),
+    "authority":       (600, 1098, 900, 1141),
+    "signature":       (605, 1150, 900, 1230),
+}
+
+PASSPORT_TEXT = {
+    "surname":        dict(font="bold", max_size=32, min_size=14, color=PASSPORT_INK, align="left", pad_x=6, upper=True),
+    "given_names":     dict(font="bold", max_size=32, min_size=14, color=PASSPORT_INK, align="left", pad_x=6, upper=True),
+    "nationality":     dict(font="bold", max_size=26, min_size=12, color=PASSPORT_INK, align="left", pad_x=4, upper=True),
+    "date_of_birth":   dict(font="bold", max_size=26, min_size=12, color=PASSPORT_INK, align="left", pad_x=4, upper=True),
+    "sex":             dict(font="bold", max_size=26, min_size=12, color=PASSPORT_INK, align="left", pad_x=4, upper=True),
+    "state_of_birth":  dict(font="bold", max_size=26, min_size=12, color=PASSPORT_INK, align="left", pad_x=4, upper=True),
+    "date_of_issue":   dict(font="bold", max_size=26, min_size=12, color=PASSPORT_INK, align="left", pad_x=4, upper=True),
+    "passport_no":     dict(font="bold", max_size=26, min_size=12, color=PASSPORT_INK, align="left", pad_x=4, upper=True),
+    "date_of_expiry":  dict(font="bold", max_size=26, min_size=12, color=PASSPORT_INK, align="left", pad_x=4, upper=True),
+    "authority":       dict(font="bold", max_size=22, min_size=11, color=PASSPORT_INK, align="left", pad_x=4, upper=True),
+    "signature":       dict(font="signature", max_size=64, min_size=22, color="#1B2A5E", align="left", pad_x=10, upper=False, vcenter="ink"),
+}
+
+
 DOCUMENTS = {
     "nin": {
         # first file that exists wins
@@ -270,4 +327,14 @@ DOCUMENTS = {
     "permit_delta": _permit_entry("naijaverse_permit_delta.jpg", STATE_BANNER_COLORS["Delta"], STATE_STAMP_FILES["Delta"]),
     "permit_abuja": _permit_entry("naijaverse_permit_abuja.jpg", STATE_BANNER_COLORS["Abuja"], STATE_STAMP_FILES["Abuja"]),
     "permit_lagos": _permit_entry("naijaverse_permit_lagos.jpg", STATE_BANNER_COLORS["Lagos"], STATE_STAMP_FILES["Lagos"]),
+    "passport": {
+        "template_files": [PASSPORT_TEMPLATE_FILE],
+        "manual_crop": (0, 0, 991, 1524),   # already cropped to just the data page ahead of time
+        "corner_radius": 0,                  # a flat page, not a rounded plastic card
+        "fields": PASSPORT_FIELDS,
+        "text_styles": PASSPORT_TEXT,
+        "image_fields": {"portrait": "portrait"},
+        "portrait_corner_radius": 0,
+        "portrait_centering": (0.5, 0.30),
+    },
 }

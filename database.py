@@ -217,6 +217,26 @@ async def init_db():
             "CREATE INDEX IF NOT EXISTS residence_permits_due_idx ON residence_permits (due_at) WHERE sent_at IS NULL;"
         )
 
+        # International passports: one row per player. Issued immediately (no due_at/sent_at —
+        # unlike the NIN card and residence permit, there's no delivery delay). passport_no is
+        # permanent; reissuing keeps it and just refreshes the dates.
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS passports (
+                player_id       INTEGER PRIMARY KEY REFERENCES players(player_id) ON DELETE CASCADE,
+                passport_no     TEXT NOT NULL UNIQUE,
+                full_name       TEXT NOT NULL,
+                date_of_birth   DATE NOT NULL,
+                sex             TEXT NOT NULL DEFAULT '',
+                state_of_origin TEXT NOT NULL,
+                date_of_issue   DATE NOT NULL,
+                date_of_expiry  DATE NOT NULL,
+                created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            """
+        )
+
         # Stock portrait pool for players without a picture of their own. assigned_to is freed
         # automatically (ON DELETE SET NULL) when a player leaves, so their face goes back into
         # the pool instead of being lost.
@@ -743,6 +763,36 @@ async def get_residence_permits_by_state(state: str):
 async def get_residence_permit_by_player(player_id: int):
     async with get_pool().acquire() as conn:
         return await conn.fetchrow("SELECT * FROM residence_permits WHERE player_id = $1;", player_id)
+
+
+# ---------------------------------------------------------------------------
+# International passports
+# ---------------------------------------------------------------------------
+
+async def upsert_passport(player_id, passport_no, full_name, date_of_birth, sex, state_of_origin,
+                          date_of_issue, date_of_expiry):
+    """Create a player's passport, or reissue it (keeping the original passport_no) if they have one."""
+    async with get_pool().acquire() as conn:
+        return await conn.fetchrow(
+            """
+            INSERT INTO passports (player_id, passport_no, full_name, date_of_birth, sex,
+                                   state_of_origin, date_of_issue, date_of_expiry)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            ON CONFLICT (player_id) DO UPDATE SET
+                full_name = EXCLUDED.full_name, date_of_birth = EXCLUDED.date_of_birth,
+                sex = EXCLUDED.sex, state_of_origin = EXCLUDED.state_of_origin,
+                date_of_issue = EXCLUDED.date_of_issue, date_of_expiry = EXCLUDED.date_of_expiry,
+                updated_at = NOW()
+            RETURNING *;
+            """,
+            player_id, passport_no, full_name, date_of_birth, sex, state_of_origin,
+            date_of_issue, date_of_expiry,
+        )
+
+
+async def get_passport_by_player(player_id: int):
+    async with get_pool().acquire() as conn:
+        return await conn.fetchrow("SELECT * FROM passports WHERE player_id = $1;", player_id)
 
 
 async def get_due_residence_permits(limit: int = 10):

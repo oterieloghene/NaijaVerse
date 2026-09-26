@@ -159,3 +159,8 @@ def is_immigration_office(channel_name):
     """True for the immigration-office channel itself (not its front-desk sub-channel)."""
     name = channel_name.casefold()
     return "immigration-office" in name and "front-desk" not in name
+
+
+def is_chief_marshal_office(channel_name):
+    """True for the chief-marshal-office channel (an emoji/decoration prefix is fine)."""
+    return "chief-marshal-office" in channel_name.casefold()
