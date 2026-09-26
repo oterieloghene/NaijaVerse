@@ -156,12 +156,30 @@ class HomeView(OwnedView):
         async def callback(interaction):
             if key == "bank":
                 await open_bank(interaction)
-            elif key == "estate":
-                from cogs.estate import open_estate
-                await open_estate(interaction)
+            elif key == "smart":
+                await open_smart(interaction)
             else:
                 await interaction.response.defer()       # app not built yet: silently do nothing
         return callback
+
+
+def _smart_menu_embed():
+    return discord.Embed(title="📲 Smart", description="What would you like to do?", colour=0x455A64)
+
+
+class SmartMenuView(OwnedView):
+    @discord.ui.button(label="Estate", emoji="🏘️", style=discord.ButtonStyle.primary, row=0)
+    async def estate(self, interaction, button):
+        from cogs.estate import open_estate
+        await open_estate(interaction)
+
+    @discord.ui.button(label="Back", emoji="⬅️", style=discord.ButtonStyle.secondary, row=1)
+    async def back(self, interaction, button):
+        await show_home(interaction)
+
+
+async def open_smart(interaction):
+    await _show(interaction, _smart_menu_embed(), SmartMenuView(interaction.user.id))
 
 
 async def show_home(interaction):

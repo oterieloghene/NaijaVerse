@@ -1,7 +1,7 @@
 """
 cogs/estate.py
 
-The "Estate" app on !phone (the slot that used to be the unused "Smart" app):
+The "Estate" screen, opened from !phone's Smart app (Smart > Estate):
 
   Apply for Pass   Owner only, must be standing in their own house. Names a
                    visitor, which of their own threads to grant, and a
@@ -12,8 +12,20 @@ The "Estate" app on !phone (the slot that used to be the unused "Smart" app):
                    house type has one — low-cost housing doesn't) and tags
                    the visitor into exactly the threads the owner picked.
                    The clock starts here, not at approval.
-  End Visit        Visitor ends an active pass early — access is stripped
-                   immediately, no cooldown.
+  End Visit        Visitor ends their one active pass early — access is
+                   stripped immediately, no cooldown.
+  Kick Guest       Owner ends an active guest's pass on their own house.
+                   Access is stripped the same as End Visit, but it carries
+                   the same cooldown as an auto-expiry, and a message is
+                   posted in the house's parent channel. The visitor is only
+                   relocated to immigration-office if they're actually
+                   standing in that house at the moment — otherwise their
+                   location is left alone.
+
+A player can only hold ONE active (redeemed) pass at a time, anywhere —
+checked both when an owner applies (naming a visitor who already has one
+blocks the request) and when a code is redeemed (in case a second pass for
+the same visitor got approved in the meantime).
 
 Housing Officers approve/deny/revoke from buttons on the staff-office
 message itself (guest_pass_database.py tracks the request through
@@ -44,7 +56,7 @@ import guest_pass_config as gcfg
 import guest_pass_database as gdb
 import housing_config as hcfg
 import housing_database as hdb
-from location_permissions import state_location_channels
+from location_permissions import state_location_channels, sync_member_permissions
 from player_rules import find_roles
 
 log = logging.getLogger(__name__)
@@ -209,19 +221,36 @@ class EstateMenuView(discord.ui.View):
     async def end_visit(self, interaction, button):
         rows = await gdb.get_active_for_visitor(interaction.user.id)
         if not rows:
-            await interaction.response.send_message("You don't have any active passes.", ephemeral=True)
+            await interaction.response.send_message("You don't have an active pass.", ephemeral=True)
+            return
+        request = rows[0]
+        await gdb.end_early(request["request_id"])
+        await _revoke_access(interaction.guild, request, interaction.user)
+        await interaction.response.send_message("Visit ended — access removed, no cooldown.", ephemeral=True)
+
+    @discord.ui.button(label="Kick Guest", emoji="🥾", style=discord.ButtonStyle.secondary, row=1)
+    async def kick_guest(self, interaction, button):
+        owner = await database.get_player_by_discord_id(interaction.user.id)
+        assignment = await hdb.get_assignment(owner["player_id"], owner["current_state"]) if owner else None
+        if not owner or not assignment or assignment["house_type"] != owner["current_sub_location"]:
+            await interaction.response.send_message(
+                "You need to be standing in your own house to kick a guest.", ephemeral=True)
+            return
+        rows = await gdb.get_active_for_assignment(assignment["assignment_id"])
+        if not rows:
+            await interaction.response.send_message("You don't have any guests to kick right now.",
+                                                      ephemeral=True)
             return
         await interaction.response.send_message(
-            "Which pass do you want to end?", view=EndVisitView(self.owner_id, rows), ephemeral=True)
+            "Who do you want to kick?", view=KickGuestView(interaction.guild, rows), ephemeral=True)
 
-    @discord.ui.button(label="Back", emoji="⬅️", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="Back", emoji="⬅️", style=discord.ButtonStyle.secondary, row=2)
     async def back(self, interaction, button):
-        from cogs.phone import show_home
-        await show_home(interaction)
+        from cogs.phone import open_smart
+        await open_smart(interaction)
 
 
 async def open_estate(interaction):
-    await interaction.response.defer()
     await _show(interaction, _estate_menu_embed(), EstateMenuView(interaction.user.id))
 
 
@@ -263,6 +292,10 @@ class ApplyModal(discord.ui.Modal, title="Apply for a Guest Pass"):
         if not visitor_player:
             await interaction.response.send_message(f"{visitor_member.display_name} hasn't arrived yet.",
                                                       ephemeral=True)
+            return
+        if await gdb.get_active_for_visitor(visitor_member.id):
+            await interaction.response.send_message(
+                f"{visitor_member.display_name} already has an active guest pass elsewhere.", ephemeral=True)
             return
 
         until = await gdb.get_cooldown_until(owner["player_id"], visitor_player["player_id"])
@@ -426,6 +459,10 @@ class RedeemModal(discord.ui.Modal, title="Redeem Guest Pass Code"):
         if request is None:
             await interaction.response.send_message("Invalid or expired code.", ephemeral=True)
             return
+        if await gdb.get_active_for_visitor(interaction.user.id):
+            await interaction.response.send_message(
+                "You already have an active pass — end it first with End Visit.", ephemeral=True)
+            return
         expires_at = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=request["granted_minutes"])
         await gdb.redeem(request["request_id"], expires_at)
         await _grant_access(interaction.guild, request, interaction.user)
@@ -434,17 +471,17 @@ class RedeemModal(discord.ui.Modal, title="Redeem Guest Pass Code"):
 
 
 # ---------------------------------------------------------------------------
-# End Visit
+# Kick Guest
 # ---------------------------------------------------------------------------
 
-class EndVisitSelect(discord.ui.Select):
-    def __init__(self, rows):
-        options = [
-            discord.SelectOption(label=f"{cfg.HOUSE_TYPES[row['house_type']][1]} ({row['state']})",
-                                 value=str(row["request_id"]))
-            for row in rows
-        ]
-        super().__init__(placeholder="Choose a pass to end", options=options)
+class KickGuestSelect(discord.ui.Select):
+    def __init__(self, guild, rows):
+        options = []
+        for row in rows:
+            member = guild.get_member(row["visitor_discord_id"])
+            name = member.display_name if member else f"Player #{row['visitor_player_id']}"
+            options.append(discord.SelectOption(label=name, value=str(row["request_id"])))
+        super().__init__(placeholder="Choose a guest to kick", options=options)
 
     async def callback(self, interaction):
         request_id = int(self.values[0])
@@ -452,15 +489,40 @@ class EndVisitSelect(discord.ui.Select):
         if request is None or request["status"] != "redeemed":
             await interaction.response.send_message("That pass is no longer active.", ephemeral=True)
             return
-        await gdb.end_early(request_id)
-        await _revoke_access(interaction.guild, request, interaction.user)
-        await interaction.response.edit_message(content="Visit ended — access removed, no cooldown.", view=None)
+
+        guild = interaction.guild
+        visitor_member = guild.get_member(request["visitor_discord_id"])
+        owner_member = guild.get_member(interaction.user.id)
+
+        await gdb.end_early(request["request_id"])
+        await _revoke_access(guild, request, visitor_member)
+
+        until = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=gcfg.COOLDOWN_MINUTES)
+        await gdb.set_cooldown(request["owner_player_id"], request["visitor_player_id"], until)
+
+        visitor_player = await database.get_player_by_discord_id(request["visitor_discord_id"])
+        if (visitor_player and visitor_player["current_state"] == request["state"]
+                and visitor_player["current_sub_location"] == request["house_type"]):
+            await database.update_player_field(visitor_player["player_id"], "current_sub_location",
+                                               "immigration-office")
+            if visitor_member is not None:
+                await sync_member_permissions(visitor_member)
+
+        house_channel = state_location_channels(guild, request["state"]).get(request["house_type"])
+        if house_channel is not None and visitor_member is not None and owner_member is not None:
+            try:
+                await house_channel.send(f"{visitor_member.mention} was kicked out of "
+                                         f"{owner_member.mention}'s house 🙆😭")
+            except discord.HTTPException:
+                pass
+
+        await interaction.response.edit_message(content="Guest kicked — access removed.", view=None)
 
 
-class EndVisitView(discord.ui.View):
-    def __init__(self, owner_id, rows):
+class KickGuestView(discord.ui.View):
+    def __init__(self, guild, rows):
         super().__init__(timeout=120)
-        self.add_item(EndVisitSelect(rows))
+        self.add_item(KickGuestSelect(guild, rows))
 
 
 # ---------------------------------------------------------------------------
