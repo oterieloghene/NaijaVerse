@@ -8,7 +8,7 @@ Files this needs (relative to the project folder, next to bot.py):
     assets/templates/naijaverse_phone_template.png   <- the cropped phone picture
     assets/fonts/WorkSans-Bold.ttf                   <- already there for the NIN card
 
-All boxes are (left, top, right, bottom) in pixels of the CROPPED phone picture (856 x 1310).
+All boxes are (left, top, right, bottom) in pixels of the phone picture (891 x 1763).
 """
 
 from pathlib import Path
@@ -22,9 +22,9 @@ FONT_PATH = BASE_DIR / "assets" / "fonts" / "WorkSans-Bold.ttf"
 # ---------------------------------------------------------------------------
 
 # The original battery icon is painted over this area, then a fresh one is drawn.
-BATTERY_ERASE_BOX = (676, 80, 754, 124)
+BATTERY_ERASE_BOX = (700, 84, 784, 132)
 # The new battery body (the little cap on the right is added automatically).
-BATTERY_BODY_BOX = (680, 88, 738, 116)
+BATTERY_BODY_BOX = (706, 94, 748, 120)
 LOW_BATTERY_PERCENT = 20          # at or below this the fill turns red
 
 # ---------------------------------------------------------------------------
@@ -43,13 +43,17 @@ ACTION_COST = {
 # ---------------------------------------------------------------------------
 # Apps (same order as the icons on the picture: 3 per row, 4 rows)
 # key, button label, button emoji
+#
+# Only "bank" and "smart" are wired to anything (see cogs/phone.py) - renaming or reordering
+# any of the other rows is safe and needs no other code change. Keep those two keys as they
+# are, or update their callback lookup in cogs/phone.py to match.
 # ---------------------------------------------------------------------------
 
 APPS = [
-    ("bus", "Bus", "🚌"), ("taxi", "Taxi", "🚕"), ("dispatch", "Dispatch", "📦"),
+    ("travels", "Travels", "✈️"), ("taxi", "Taxi", "🚕"), ("dispatch", "Dispatch", "📦"),
     ("mechanic", "Mechanic", "🔧"), ("bank", "Bank", "🏦"), ("emergency", "Emergency", "🚨"),
-    ("flight", "Flight", "✈️"), ("hotel", "Hotel", "🏨"), ("job", "Job", "💼"),
-    ("smart", "Smart", "📲"), ("shopping", "Shopping", "🛍️"), ("contacts", "Contacts", "👤"),
+    ("map", "Map", "🗺️"), ("whatsapp", "Whatsapp", "💬"), ("bet9ja", "Bet9ja", "🎰"),
+    ("smart", "Smart", "📲"), ("jumia", "Jumia", "🛒"), ("message", "Message", "✉️"),
 ]
 APPS_PER_ROW = 3
 
