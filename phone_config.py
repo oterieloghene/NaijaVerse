@@ -51,7 +51,7 @@ ACTION_COST = {
 
 APPS = [
     ("travels", "Travels", "✈️"), ("taxi", "Taxi", "🚕"), ("dispatch", "Dispatch", "📦"),
-    ("mechanic", "Mechanic", "🔧"), ("bank", "Bank", "🏦"), ("emergency", "Emergency", "🚨"),
+    ("mechanic", "Mechanic", "🔧"), ("bank", "Bank", "🏦"), ("emergency", "SOS", "🚨"),
     ("map", "Map", "🗺️"), ("whatsapp", "Whatsapp", "💬"), ("bet9ja", "Bet9ja", "🎰"),
     ("smart", "Smart", "📲"), ("jumia", "Jumia", "🛒"), ("message", "Message", "✉️"),
 ]
