@@ -1,33 +1,39 @@
 """
 cogs/trek.py
 
-!walk <codename> / !trek <codename> — on-foot travel, Delta only for now.
+!walk <codename> / !trek <codename> — on-foot travel, one state at a time
+per the player's current_state. Currently supports Delta and Lagos (see
+trek_config.STATE_WALK_ORDERS); any other state is declined with
+MSG_WRONG_STATE until it gets its own <state>_location_order.py.
 
 Rules
 -----
 - Must be typed in the channel matching the player's CURRENT parent location
   (players.current_sub_location) — you trek FROM where you actually are.
-- Destination is one of the approved code names (locations_codenames.csv,
-  via trek_config.resolve_codename / keke_config), resolved to its REAL
-  location — unlike keke, there is no hub-substitution for exempt channels;
-  a trekker walks all the way there.
+- Destination is one of that state's approved code names (Delta:
+  locations_codenames.csv via keke_config; Lagos:
+  locations_codenames_lagos.csv via danfo_config), resolved to its REAL
+  location — unlike keke/danfo, there is no hub-substitution for exempt
+  channels; a trekker walks all the way there. Trek never crosses states —
+  only destinations in the player's current state are reachable.
 - Full role-gating check (locations.has_access) plus the Governor's House
   guest-pass check (locations.guest_pass_needed + database.has_guest_pass),
-  same as every other access check in the game.
+  same as every other access check in the game, in whichever state the
+  player is currently in.
 - Travel takes trek_config.HOP_SECONDS (70s) per location hop on the walking
   path (trek_config.path_between). Every ANNOUNCE_EVERY_N_HOPS (2) hops, a
   silent, no-ping "<name> just walked past here..." notice is posted in that
   intermediate channel — the player still passes every location in between,
   only the notice is skipped on the in-between hop.
-- Same permission handling as keke boarding: the departure channel AND every
-  room inside it the player could otherwise write in are locked (personal
-  Send Messages: deny) for the whole walk, and lifted on arrival. Locks are
-  recorded in trek_database so a bot restart mid-walk doesn't leave anyone
-  muted forever.
+- Same permission handling as keke/danfo boarding: the departure channel AND
+  every room inside it the player could otherwise write in are locked
+  (personal Send Messages: deny) for the whole walk, and lifted on arrival.
+  Locks are recorded in trek_database so a bot restart mid-walk doesn't
+  leave anyone muted forever.
 - On arrival, current_sub_location is updated and channel permissions are
-  re-synced, same as keke drop-off.
+  re-synced, same as keke/danfo drop-off.
 
-Reused verbatim from keke (cogs/keke.py) so the two systems feel consistent:
+Reused verbatim from keke (cogs/keke.py) so the systems feel consistent:
   "invalid destination ❌"
   "Not accessible❗You need gate pass 🪪"
 """
@@ -49,7 +55,7 @@ log = logging.getLogger("nvv.trek")
 MSG_INVALID_DEST = "invalid destination ❌"
 MSG_GATE_PASS = "Not accessible❗You need gate pass 🪪"
 MSG_NO_PLAYER_RECORD = "Not authorised! Meet @immigrationofficer for help❗"
-MSG_WRONG_STATE = "🚧 Trekking hasn't been set up outside Delta yet."
+MSG_WRONG_STATE = "🚧 Trekking hasn't been set up in {state} yet."
 MSG_NOT_AT_ORIGIN = "You have to `!trek`/`!walk` from the location you're currently in."
 MSG_ALREADY_THERE = "You're already there."
 MSG_ALREADY_TREKKING = "You're already on a trek — wait until you arrive."
@@ -118,18 +124,18 @@ class Trek(commands.Cog):
     async def cog_load(self):
         await tdb.init_tables()
 
-    def _channel_map(self, guild):
-        return perms.state_location_channels(guild, tc.STATE)
+    def _channel_map(self, guild, state):
+        return perms.state_location_channels(guild, state)
 
-    async def _gate_check(self, member, cat, loc, player):
-        node = locations.get_location(tc.STATE, cat, loc)
+    async def _gate_check(self, member, state, cat, loc, player):
+        node = locations.get_location(state, cat, loc)
         if node is None:
             return False
         role_names = [r.name for r in member.roles]
         if not locations.has_access(role_names, node["access"]):
             return False
         pass_type = locations.guest_pass_needed(role_names, node["access"])
-        if pass_type and not await database.has_guest_pass(player["player_id"], tc.STATE, pass_type):
+        if pass_type and not await database.has_guest_pass(player["player_id"], state, pass_type):
             return False
         return True
 
@@ -232,8 +238,9 @@ class Trek(commands.Cog):
         if player is None:
             await ctx.reply(MSG_NO_PLAYER_RECORD)
             return
-        if player["current_state"] != tc.STATE:
-            await ctx.reply(MSG_WRONG_STATE)
+        state = player["current_state"]
+        if not tc.supported(state):
+            await ctx.reply(MSG_WRONG_STATE.format(state=state))
             return
         if ctx.author.id in self._trekking:
             await ctx.reply(MSG_ALREADY_TREKKING)
@@ -245,9 +252,9 @@ class Trek(commands.Cog):
             await ctx.reply(MSG_NOT_AT_ORIGIN)
             return
 
-        dest = tc.resolve_codename(codename)
+        dest = tc.resolve_codename(state, codename)
         if dest is None:
-            log.info("trek: unknown codename %r", codename)
+            log.info("trek: unknown codename %r in %s", codename, state)
             await ctx.reply(MSG_INVALID_DEST)
             return
         cat, loc_code, parent_name = dest
@@ -256,19 +263,19 @@ class Trek(commands.Cog):
             await ctx.reply(MSG_ALREADY_THERE)
             return
 
-        if not await self._gate_check(ctx.author, cat, loc_code, player):
+        if not await self._gate_check(ctx.author, state, cat, loc_code, player):
             await ctx.reply(MSG_GATE_PASS)
             return
 
-        path = tc.path_between(origin, loc_code)
+        path = tc.path_between(state, origin, loc_code)
         if path is None:
-            log.warning("trek: no walk-order path from %r to %r", origin, loc_code)
+            log.warning("trek: no walk-order path from %r to %r in %s", origin, loc_code, state)
             await ctx.reply(MSG_INVALID_DEST)
             return
 
         hops = len(path) - 1
         eta = hops * tc.HOP_SECONDS
-        channel_map = self._channel_map(ctx.guild)
+        channel_map = self._channel_map(ctx.guild, state)
 
         self._trekking.add(ctx.author.id)
         await ctx.reply(
