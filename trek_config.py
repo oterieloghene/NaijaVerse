@@ -23,15 +23,18 @@ in any state. Trek always operates within a single state; a player can only
 !trek/!walk to a destination in the state they are currently in.
 
 Source of truth for codenames: locations_codenames.csv (Delta, via
-keke_config) and locations_codenames_lagos.csv (Lagos, via danfo_config).
+keke_config), locations_codenames_lagos.csv (Lagos, via danfo_config), and
+locations_codenames_abuja.csv (Abuja, via bus_config).
 """
 
+import abuja_location_order as alo
+import bus_config as bc
 import danfo_config as dc
 import delta_location_order as dlo
 import keke_config as kc
 import lagos_location_order as llo
 
-# Longer than a keke/danfo's dwell (60s): 70s per location hop while trekking.
+# Longer than a keke/danfo/korope's dwell (60s): 70s per location hop while trekking.
 HOP_SECONDS = 70
 
 # Post a "just walked past here" notice every 2 hops (not every hop — the
@@ -49,6 +52,7 @@ DEPARTED_TEMPLATE = "🚶 {name} set out trekking to {destination}. ETA: {eta}."
 STATE_WALK_ORDERS = {
     "Delta": dlo.DELTA_LOCATION_ORDER,
     "Lagos": llo.LAGOS_LOCATION_ORDER,
+    "Abuja": alo.ABUJA_LOCATION_ORDER,
 }
 STATE_WALK_INDEX = {
     state: {code: i for i, code in enumerate(order)}
@@ -56,11 +60,12 @@ STATE_WALK_INDEX = {
 }
 
 # Each state's codename table lives in its own transport config, keyed by
-# its own command prefix (Delta's !keke, Lagos's !danfo) — trek just reuses
-# whichever table matches the player's current state.
+# its own command prefix (Delta's !keke, Lagos's !danfo, Abuja's !bus) —
+# trek just reuses whichever table matches the player's current state.
 _STATE_CODENAME_RESOLVER = {
     "Delta": lambda word: kc.codename_dest(f"!keke {word}"),
     "Lagos": lambda word: dc.codename_dest(f"!danfo {word}"),
+    "Abuja": lambda word: bc.codename_dest(f"!bus {word}"),
 }
 
 assert len(dlo.DELTA_LOCATION_ORDER) == len(kc.CODENAMES), (
@@ -68,6 +73,9 @@ assert len(dlo.DELTA_LOCATION_ORDER) == len(kc.CODENAMES), (
 )
 assert len(llo.LAGOS_LOCATION_ORDER) == len(dc.CODENAMES), (
     "Lagos trek walk order missing/duplicating a codename destination"
+)
+assert len(alo.ABUJA_LOCATION_ORDER) == len(bc.CODENAMES), (
+    "Abuja trek walk order missing/duplicating a codename destination"
 )
 
 
