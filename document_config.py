@@ -266,7 +266,7 @@ def _permit_entry(template_file, banner_color, stamp_file):
 # ---------------------------------------------------------------------------
 
 PASSPORT_DELAY_MINUTES = 0   # issued immediately, unlike the NIN card / residence permit
-PASSPORT_VALIDITY_DAYS = int(os.environ.get("PASSPORT_VALIDITY_DAYS", "90"))
+PASSPORT_VALIDITY_DAYS = int(os.environ.get("PASSPORT_VALIDITY_DAYS", "28"))   # 4 weeks
 PASSPORT_ISSUING_AUTHORITY = "NAIJAVERSE IMMIGRATION"
 
 # The template is the full two-page spread (left data page + right Travel Records page), cropped
