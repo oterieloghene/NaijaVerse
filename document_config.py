@@ -267,10 +267,12 @@ def _permit_entry(template_file, banner_color, stamp_file):
 
 PASSPORT_DELAY_MINUTES = 0   # issued immediately, unlike the NIN card / residence permit
 PASSPORT_VALIDITY_DAYS = int(os.environ.get("PASSPORT_VALIDITY_DAYS", "90"))
-PASSPORT_ISSUING_AUTHORITY = "NAIJAVERSE IMMIGRATION SERVICE"
+PASSPORT_ISSUING_AUTHORITY = "NAIJAVERSE IMMIGRATION"
 
-# The template is already just the passport's left (data) page — cropped ahead of time from the
-# two-page spread you supplied, so no further cropping is needed at render time.
+# The template is the full two-page spread (left data page + right Travel Records page), cropped
+# ahead of time from the book photo you supplied — the crop only trims the surrounding background,
+# it keeps both pages. Only the left page's fields are filled; the right page is left exactly as
+# it was in the artwork, per the brief.
 PASSPORT_TEMPLATE_FILE = "naijaverse_passport_template.png"
 PASSPORT_INK = "#1A1611"
 
@@ -281,14 +283,14 @@ PASSPORT_FIELDS = {
     "surname":         (445, 719, 900, 763),
     "given_names":     (445, 789, 900, 863),
     "nationality":     (445, 891, 575, 934),
-    "date_of_birth":   (600, 891, 900, 934),
+    "date_of_birth":   (716, 891, 904, 934),
     "sex":             (445, 960, 575, 1003),
-    "state_of_birth":  (600, 960, 900, 1003),
+    "state_of_birth":  (716, 960, 904, 1003),
     "date_of_issue":   (445, 1030, 575, 1073),
-    "passport_no":     (600, 1030, 900, 1073),
+    "passport_no":     (716, 1030, 904, 1073),
     "date_of_expiry":  (445, 1098, 575, 1141),
-    "authority":       (600, 1098, 900, 1141),
-    "signature":       (605, 1150, 900, 1230),
+    "authority":       (716, 1098, 904, 1141),
+    "signature":       (716, 1150, 978, 1230),
 }
 
 PASSPORT_TEXT = {
@@ -329,7 +331,7 @@ DOCUMENTS = {
     "permit_lagos": _permit_entry("naijaverse_permit_lagos.jpg", STATE_BANNER_COLORS["Lagos"], STATE_STAMP_FILES["Lagos"]),
     "passport": {
         "template_files": [PASSPORT_TEMPLATE_FILE],
-        "manual_crop": (0, 0, 991, 1524),   # already cropped to just the data page ahead of time
+        "manual_crop": (0, 0, 2073, 1524),   # full two-page spread; only the left (data) page's fields get filled
         "corner_radius": 0,                  # a flat page, not a rounded plastic card
         "fields": PASSPORT_FIELDS,
         "text_styles": PASSPORT_TEXT,
