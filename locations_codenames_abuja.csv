@@ -1,0 +1,37 @@
+code,name
+!bus rural,Rural District
+!bus university,Administrative Block
+!bus bedsitter,Bed-Sitter
+!bus linehouse,Line Houses
+!bus immigration,Immigration Office
+!bus rental,Rental Desk
+!bus police,Police Station
+!bus clerk,Clerk Office
+!bus hotel,Hotel Reception
+!bus estate,Private Estate
+!bus duplex,Luxury Duplex
+!bus penthouse,Penthouse
+!bus fctminister,FCT Minister
+!bus secretariat,State Secretariat
+!bus council,Council
+!bus cityhall,City Hall
+!bus cos,Chief of Staff
+!bus president,President Office
+!bus vp,Vice President Office
+!bus villa,President Villa
+!bus cbn,CBN Lobby
+!bus bank,Banking Hall
+!bus miniflat,Mini Flat
+!bus 2bedroom,Two Bedroom Flat
+!bus 3bedroom,Three Bedroom Flat
+!bus nepa,Help Desk
+!bus hospital,Hospital Lobby
+!bus school,School Building
+!bus broadcast,Broadcasting Station
+!bus market,Market District
+!bus auto,Automotive District
+!bus transport,Transport District
+!bus commercial,Commercial District
+!bus industrial,Industrial District
+!bus mine,Mining Ground
+!bus dam,Kanji Dam

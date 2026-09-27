@@ -10,11 +10,11 @@ Minimal starting point for the RP bot. Wires together:
   - cogs/nin_delivery.py (NIN cards sent to parcel-pickup after 20 minutes, !portrait, !nincard,
     !splitportraits for the stock-portrait archive)
   - cogs/permit.py (Residence Permits: !permit @player <house type>, sent to parcel-pickup after 20 minutes)
-  - cogs/passport.py (International Passport: !passport @player, issued immediately, no role granted)
   - cogs/banking.py (bank accounts, tiers, !open-account, !upgrade-tier, !bal, !transfer, !with, !dep)
   - cogs/phone.py (!phone, with the Bank app)
   - cogs/keke.py (keke transport: !keke <codename>, !buy-keke, route loop engine)
   - cogs/danfo.py (danfo transport: !danfo <codename>, !buy-danfo, route loop engine)
+  - cogs/bus.py (korope transport: !bus <codename>, !buy-bus, route loop engine)
 
 Set these environment variables on Render:
   - DISCORD_TOKEN   -> your bot's token from the Discord Developer Portal
@@ -56,12 +56,8 @@ class RPBot(commands.Bot):
             await self.load_extension("cogs.permit")
         except Exception as exc:
             print(f"Residence permit delivery NOT loaded: {exc!r}")
-        try:
-            await self.load_extension("cogs.passport")
-        except Exception as exc:
-            print(f"Passport issuance NOT loaded: {exc!r}")
         # banking must load before the phone and the keke: both use the bank tables
-        for extension in ("cogs.banking", "cogs.phone", "cogs.cbn", "cogs.keke", "cogs.danfo", "cogs.oil", "cogs.housing", "cogs.trek", "cogs.estate"):
+        for extension in ("cogs.banking", "cogs.phone", "cogs.cbn", "cogs.keke", "cogs.danfo", "cogs.bus", "cogs.oil", "cogs.housing", "cogs.trek", "cogs.estate"):
             try:
                 await self.load_extension(extension)
             except Exception as exc:
