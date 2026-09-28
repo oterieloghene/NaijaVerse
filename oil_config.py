@@ -1,16 +1,36 @@
 """
 oil_config.py
 
-All the numbers and route data for the tanker/trailer oil supply chain
-(Delta oil well -> refinery -> NNPC fuel station / interstate).
+All the numbers and route data for the tanker/trailer oil supply chain,
+now covering all three states (Delta, Lagos, Abuja) so interstate trips can
+actually continue past the destination's Immigration Office.
 
 Mirrors the shape of keke_config.py: vehicle & ownership constants, route/stop
 data, storage caps, and movement timing all live here. The rules live in
 oil_database.py, the commands and channel moves in cogs/oil.py.
 
-Delta only for now (oil well and the real stop-by-stop route). Lagos and
-Abuja have no intrastate stop-order system built yet, so interstate arrivals
-there currently stop at Immigration Office with no further routing.
+Route model
+-----------
+Each state's REAL location order is its own passenger-transport spine —
+keke_config.STOP_CODES (Delta), danfo_config.STOP_CODES (Lagos), or
+bus_config.STOP_CODES (Abuja) — copied here VERBATIM. These are never
+reordered; they reflect actual physical geography and were confirmed
+correct as given. immigration-office is the interstate entry/exit point
+for every state, wherever it happens to sit in that state's own spine
+(Lagos: far end; Abuja/Delta: near the front) — that's just geography.
+
+industrial-district (refinery) hangs off "commercial-district" as an
+exempt/off-spine stop in all three states (same hub, same pattern keke/
+danfo/bus already use). For Delta, oil-well continues one further step
+past industrial-district. Crucially: in Delta and Abuja, commercial-district
+IS the spine's own endpoint, so the spur is just a straight extension. In
+LAGOS, commercial-district is NOT the endpoint — Ghetto (administrative-
+block, bed-sitter, line-houses, immigration-office) continues past it — so
+industrial-district is a genuine dead-end branch off that point, not an
+inline stop on the Mainland->Ghetto route. build_path() below handles this
+properly: a trip between two "main" stops never detours through the spur,
+and a trip touching the spur walks main-line to the branch point, then
+onto the spur (or the reverse).
 """
 
 # ---------------------------------------------------------------------------
@@ -29,6 +49,7 @@ TRAILER_TANK_CAPACITY_L = 200
 TANKER_TANK_CAPACITY_L = 500
 TRAILER_FUEL_PER_TRIP = 20       # flat burn, oil-well <-> refinery (short haul)
 TANKER_FUEL_PER_KM = 1.0         # intrastate leg burn rate
+TRAILER_FUEL_PER_INTERSTATE_TRIP = 100  # flat burn for the interstate leg
 TANKER_FUEL_PER_INTERSTATE_TRIP = 100   # flat burn for the interstate leg
 
 FUEL_LEDGER = "{S} Oil Fleet Fuel Ledger"   # treasury/narration label, per state
@@ -58,75 +79,96 @@ BARREL_TO_FUEL_L = 20            # 1 barrel -> 20L fuel
 BARREL_TO_GAS_KG = 30            # 1 barrel -> 30kg gas
 
 # ---------------------------------------------------------------------------
-# Delta route — real stop-by-stop order, no exempt-skipping.
-# Exempt only applies to keke passengers; freight stops at every real
-# location. This is keke's 17-stop spine (see keke_config.STOP_CODES) with
-# industrial-district (refinery) and oil-well appended as real stops at the
-# southern end, in the confirmed order:
-#   ... -> commercial-district -> industrial-district -> oil-well
+# Per-state routes. main_stops is each state's REAL spine, copied verbatim
+# from that state's own transport config. spur_chain starts at the branch
+# point (always "commercial-district") and continues outward; spur_chain[0]
+# is always the branch point itself, shared with main_stops.
 # ---------------------------------------------------------------------------
 
-OIL_STOP_CODES = [
-    # North terminus
-    "administrative-block",
-    "bed-sitter",
-    "line-houses",
-    "immigration-office",         # interstate exit/entry point
-    "rental-desk",
-    "police-station",
-    "clerk-office",
-    "hotel-reception",
-    "banking-hall",
-    "help-desk",
-    "hospital-lobby",
-    "school-building",
-    "broadcasting-station",
-    "market-district",
-    "automotive-district",        # NNPC Fuel Station is here — fleet parks here
-    "transport-district",
-    "commercial-district",
-    "industrial-district",        # Refinery is here
-    "oil-well",                   # South terminus — crude source
-]
-
-assert len(OIL_STOP_CODES) == 19
-OIL_STOP_INDEX = {code: i for i, code in enumerate(OIL_STOP_CODES)}
-
-NNPC_STOP = "automotive-district"
-REFINERY_STOP = "industrial-district"
-OIL_WELL_STOP = "oil-well"
-IMMIGRATION_STOP = "immigration-office"
-
-# Vehicles route/park at the PARENT district stop above (that's what's
-# stored as stop_code), but their actual messages — parked/departing/
-# in-transit/arrival — should post in the specific sub-location channel
-# inside that district, not the district channel itself.
-MESSAGE_STOP_OVERRIDE = {
-    NNPC_STOP: "nnpc-fuel-station",
-    REFINERY_STOP: "refinery",
+STATE_ROUTES = {
+    "Delta": {
+        # Same order as keke_config.STOP_CODES.
+        "main_stops": [
+            "administrative-block", "bed-sitter", "line-houses", "immigration-office",
+            "rental-desk", "police-station", "clerk-office", "hotel-reception", "banking-hall",
+            "help-desk", "hospital-lobby", "school-building", "broadcasting-station", "market-district",
+            "automotive-district", "transport-district", "commercial-district",
+        ],
+        "spur_chain": ["commercial-district", "industrial-district", "oil-well"],
+        "nnpc_stop": "automotive-district",
+        "refinery_stop": "industrial-district",
+        "oil_well_stop": "oil-well",
+        "immigration_stop": "immigration-office",
+    },
+    "Lagos": {
+        # Same order as danfo_config.STOP_CODES — Island -> Mainland -> Ghetto.
+        # NOTE: commercial-district sits mid-spine here, NOT at the end.
+        "main_stops": [
+            "rental-desk", "police-station", "clerk-office", "hotel-reception", "banking-hall",
+            "help-desk", "hospital-lobby", "school-building", "broadcasting-station", "market-district",
+            "automotive-district", "transport-district", "commercial-district",
+            "administrative-block", "bed-sitter", "line-houses", "immigration-office",
+        ],
+        "spur_chain": ["commercial-district", "industrial-district"],
+        "nnpc_stop": "automotive-district",
+        "refinery_stop": "industrial-district",
+        "oil_well_stop": None,
+        "immigration_stop": "immigration-office",
+    },
+    "Abuja": {
+        # Same order as bus_config.STOP_CODES — North -> Central -> South.
+        "main_stops": [
+            "administrative-block", "bed-sitter", "line-houses", "immigration-office",
+            "rental-desk", "police-station", "clerk-office", "hotel-reception", "banking-hall",
+            "help-desk", "hospital-lobby", "school-building", "broadcasting-station", "market-district",
+            "automotive-district", "transport-district", "commercial-district",
+        ],
+        "spur_chain": ["commercial-district", "industrial-district"],
+        "nnpc_stop": "automotive-district",
+        "refinery_stop": "industrial-district",
+        "oil_well_stop": None,
+        "immigration_stop": "immigration-office",
+    },
 }
 
-# Distance per segment. Reusing keke's flat figure (1.875km/segment) across
-# the whole line, including the two new segments (commercial-district <->
-# industrial-district, industrial-district <-> oil-well), since no separate
-# distance was given for those. Flag if these two should get their own km.
+for _state, _route in STATE_ROUTES.items():
+    assert len(_route["main_stops"]) == 17, _state
+    assert _route["spur_chain"][0] == "commercial-district", _state
+del _state, _route
+
+# Vehicles route/park at the PARENT district stop (that's what's stored as
+# stop_code), but their actual messages — parked/departing/in-transit/
+# arrival — should post in the specific sub-location channel inside that
+# district, not the district channel itself. Same override in every state.
+MESSAGE_STOP_OVERRIDE = {
+    "automotive-district": "nnpc-fuel-station",
+    "industrial-district": "refinery",
+}
+
+# Distance per segment. Reusing keke's flat figure (1.875km/segment)
+# everywhere, including the industrial-district/oil-well spur segments,
+# since no separate distance was given for those.
 KM_PER_SEGMENT = 1.875
 
 # ---------------------------------------------------------------------------
-# Movement timing — reusing keke's per-segment pace.
+# Movement timing.
 # ---------------------------------------------------------------------------
 
-MOVE_SECONDS = 2                 # drive between two adjacent real stops
-STOP_SECONDS = 60                # dwell at each real stop
+MOVE_SECONDS = 120               # drive between two adjacent real stops (trailer AND tanker)
 TRANSIT_MESSAGE_EVERY_N_STOPS = 2   # in-transit message posts after every 2 real stops passed
 
 # ---------------------------------------------------------------------------
-# Interstate — Delta-first. Placeholder fixed times for the interstate leg
-# itself (Immigration Office -> destination state's Immigration Office).
-# Proposed, not yet locked in.
+# Interstate — the fixed border-crossing leg itself (Immigration Office ->
+# destination state's Immigration Office). Symmetric per state pair.
+# Placeholder timing, not yet locked in.
 # ---------------------------------------------------------------------------
 
 INTERSTATE_LEG_SECONDS = {
-    ("Delta", "Lagos"): 15 * 60,
-    ("Delta", "Abuja"): 15 * 60,
+    frozenset({"Delta", "Lagos"}): 15 * 60,
+    frozenset({"Delta", "Abuja"}): 15 * 60,
+    frozenset({"Lagos", "Abuja"}): 15 * 60,
 }
+
+
+def interstate_leg_seconds(state_a, state_b):
+    return INTERSTATE_LEG_SECONDS[frozenset({state_a, state_b})]

@@ -46,10 +46,21 @@ async def init_tables():
                 cargo_type    TEXT NOT NULL DEFAULT 'none'
                               CHECK (cargo_type IN ('none', 'crude', 'fuel', 'gas')),
                 cargo_amount  NUMERIC(10, 3) NOT NULL DEFAULT 0 CHECK (cargo_amount >= 0),
+                current_state TEXT,
                 purchased_by  BIGINT,
                 created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
             """
+        )
+        # Defensive migration: this column was added after some deployments
+        # already created the table. `state` never changes (ownership);
+        # `current_state` is where the vehicle physically is right now —
+        # it starts equal to `state` and only changes after crossing a border.
+        await conn.execute(
+            "ALTER TABLE oil_vehicles ADD COLUMN IF NOT EXISTS current_state TEXT;"
+        )
+        await conn.execute(
+            "UPDATE oil_vehicles SET current_state = state WHERE current_state IS NULL;"
         )
         await conn.execute(
             """
@@ -128,6 +139,28 @@ async def init_tables():
             );
             """
         )
+        # Hires can be for a trailer too, not just a tanker. The original
+        # table only allowed 'tanker', so widen the CHECK on existing tables.
+        await conn.execute(
+            "ALTER TABLE oil_interstate_requests "
+            "DROP CONSTRAINT IF EXISTS oil_interstate_requests_product_check;"
+        )
+        await conn.execute(
+            "ALTER TABLE oil_interstate_requests ADD CONSTRAINT oil_interstate_requests_product_check "
+            "CHECK (product IN ('fuel', 'gas', 'tanker', 'trailer'));"
+        )
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS oil_vehicle_leases (
+                lease_id      SERIAL PRIMARY KEY,
+                vehicle_id    INTEGER NOT NULL REFERENCES oil_vehicles(vehicle_id) ON DELETE CASCADE,
+                lessee_state  TEXT NOT NULL,
+                request_id    INTEGER,
+                started_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                ended_at      TIMESTAMPTZ
+            );
+            """
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -153,6 +186,17 @@ async def get_vehicles(state):
 async def get_vehicle(vehicle_id):
     async with database.get_pool().acquire() as conn:
         return await conn.fetchrow("SELECT * FROM oil_vehicles WHERE vehicle_id = $1;", vehicle_id)
+
+
+async def update_vehicle_state(vehicle_id, new_state):
+    """Updates where a vehicle physically IS (current_state) after a border
+    crossing. Ownership (the `state` column — whose fleet it belongs to,
+    and whose Commissioners command it) never changes."""
+    async with database.get_pool().acquire() as conn:
+        return await conn.fetchrow(
+            "UPDATE oil_vehicles SET current_state = $1 WHERE vehicle_id = $2 RETURNING *;",
+            new_state, vehicle_id,
+        )
 
 
 async def buy_vehicle(state, vehicle_type, buyer_id):
@@ -194,8 +238,8 @@ async def buy_vehicle(state, vehicle_type, buyer_id):
 
             row = await conn.fetchrow(
                 """
-                INSERT INTO oil_vehicles (state, vehicle_type, name, fuel_liters, purchased_by)
-                VALUES ($1, $2, $3, $4, $5)
+                INSERT INTO oil_vehicles (state, vehicle_type, name, fuel_liters, purchased_by, current_state)
+                VALUES ($1, $2, $3, $4, $5, $1)
                 RETURNING vehicle_id;
                 """,
                 state, vehicle_type, name, tank, buyer_id,
@@ -206,10 +250,6 @@ async def buy_vehicle(state, vehicle_type, buyer_id):
                 "cost": cost,
                 "new_treasury_balance": new_treasury_balance,
                 "ref": tx["ref"],
-                "kind": f"{vehicle_type}_purchase", "amount": cost,
-                "created_at": tx["created_at"], "state": state,
-                "sender": bank._party(treasury, new_treasury_balance), "receiver": None,
-                "from_label": treasury["name"], "to_label": name,
             }
 
 
@@ -237,6 +277,17 @@ async def get_parked():
     async with database.get_pool().acquire() as conn:
         return await conn.fetch(
             "SELECT vehicle_id, channel_id, message_id, stop_code, direction FROM oil_vehicle_parked;"
+        )
+
+
+async def get_parked_for(vehicle_id):
+    """Read-only — unlike pop_parked, does NOT remove the row. Used to check
+    where a vehicle is parked before deciding whether an action is allowed."""
+    async with database.get_pool().acquire() as conn:
+        return await conn.fetchrow(
+            "SELECT vehicle_id, channel_id, message_id, stop_code, direction "
+            "FROM oil_vehicle_parked WHERE vehicle_id = $1;",
+            vehicle_id,
         )
 
 
@@ -641,8 +692,8 @@ async def offload_crude(vehicle_id, state, qty):
 
             new_cargo = vehicle["cargo_amount"] - qty
             await conn.execute(
-                "UPDATE oil_vehicles SET cargo_amount = $1::numeric, "
-                "cargo_type = CASE WHEN $1::numeric = 0 THEN 'none' ELSE cargo_type END "
+                "UPDATE oil_vehicles SET cargo_amount = $1, "
+                "cargo_type = CASE WHEN $1 = 0 THEN 'none' ELSE cargo_type END "
                 "WHERE vehicle_id = $2;",
                 new_cargo, vehicle_id,
             )
@@ -715,8 +766,8 @@ async def offload_product(vehicle_id, state, qty):
 
             new_cargo = vehicle["cargo_amount"] - qty
             await conn.execute(
-                "UPDATE oil_vehicles SET cargo_amount = $1::numeric, "
-                "cargo_type = CASE WHEN $1::numeric = 0 THEN 'none' ELSE cargo_type END "
+                "UPDATE oil_vehicles SET cargo_amount = $1, "
+                "cargo_type = CASE WHEN $1 = 0 THEN 'none' ELSE cargo_type END "
                 "WHERE vehicle_id = $2;",
                 new_cargo, vehicle_id,
             )
@@ -796,4 +847,89 @@ async def mark_dispatched(request_id):
         return await conn.fetchrow(
             "UPDATE oil_interstate_requests SET status = 'dispatched' WHERE request_id = $1 RETURNING *;",
             request_id,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Leases — a state hiring another state's trailer/tanker. Ownership (the
+# `state` column on oil_vehicles) never changes; a lease only says which
+# OTHER state's Commissioner of Petroleum may operate the vehicle while it
+# is physically in that state.
+# ---------------------------------------------------------------------------
+
+async def get_active_lease(vehicle_id):
+    async with database.get_pool().acquire() as conn:
+        return await conn.fetchrow(
+            "SELECT * FROM oil_vehicle_leases WHERE vehicle_id = $1 AND ended_at IS NULL;",
+            vehicle_id,
+        )
+
+
+async def get_leased_in(state):
+    """Vehicles owned by OTHER states that `state` currently has an active
+    lease on. Each row is an oil_vehicles row plus lessee_state."""
+    async with database.get_pool().acquire() as conn:
+        return await conn.fetch(
+            """
+            SELECT v.*, l.lessee_state
+            FROM oil_vehicle_leases l
+            JOIN oil_vehicles v ON v.vehicle_id = l.vehicle_id
+            WHERE l.lessee_state = $1 AND l.ended_at IS NULL
+            ORDER BY v.vehicle_type, v.vehicle_id;
+            """,
+            state,
+        )
+
+
+async def start_lease(request_id, vehicle_id):
+    """
+    Activates a lease for a PAID hire request. The vehicle must belong to
+    the request's owning state, match the requested type, and not already
+    be leased. Marks the request dispatched. Returns the lease row.
+    """
+    async with database.get_pool().acquire() as conn:
+        async with conn.transaction():
+            request = await conn.fetchrow(
+                "SELECT * FROM oil_interstate_requests WHERE request_id = $1 FOR UPDATE;", request_id
+            )
+            if request is None:
+                raise BankError("That request does not exist.")
+            if request["product"] not in ("tanker", "trailer"):
+                raise BankError("That request is for product, not a vehicle hire.")
+            if request["status"] != "paid":
+                raise BankError(f"That request is {request['status']} — it has to be paid first.")
+
+            vehicle = await conn.fetchrow(
+                "SELECT * FROM oil_vehicles WHERE vehicle_id = $1 FOR UPDATE;", vehicle_id
+            )
+            if vehicle is None or vehicle["state"] != request["owning_state"]:
+                raise BankError("That vehicle isn't in the owning state's fleet.")
+            if vehicle["vehicle_type"] != request["product"]:
+                raise BankError(f"That request is for a {request['product']}, not a {vehicle['vehicle_type']}.")
+            active = await conn.fetchval(
+                "SELECT 1 FROM oil_vehicle_leases WHERE vehicle_id = $1 AND ended_at IS NULL;", vehicle_id
+            )
+            if active:
+                raise BankError(f"{vehicle['name']} is already leased out.")
+
+            lease = await conn.fetchrow(
+                "INSERT INTO oil_vehicle_leases (vehicle_id, lessee_state, request_id) "
+                "VALUES ($1, $2, $3) RETURNING *;",
+                vehicle_id, request["requesting_state"], request_id,
+            )
+            await conn.execute(
+                "UPDATE oil_interstate_requests SET status = 'dispatched' WHERE request_id = $1;",
+                request_id,
+            )
+            return lease
+
+
+async def end_lease(vehicle_id):
+    """Lessee hands the vehicle back. Returns the ended lease row, or None
+    if there was no active lease."""
+    async with database.get_pool().acquire() as conn:
+        return await conn.fetchrow(
+            "UPDATE oil_vehicle_leases SET ended_at = NOW() "
+            "WHERE vehicle_id = $1 AND ended_at IS NULL RETURNING *;",
+            vehicle_id,
         )
